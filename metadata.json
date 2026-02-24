@@ -1,0 +1,8 @@
+{
+  "name": "Toddler Drawing Dreamer (Python API)",
+  "description": "Python API version of the Toddler Drawing Dreamer project. Can be executed locally without a browser.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "prompt": ""
+}

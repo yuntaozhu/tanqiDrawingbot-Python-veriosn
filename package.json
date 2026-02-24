@@ -1,0 +1,10 @@
+{
+  "name": "toddler-drawing-dreamer-api",
+  "version": "1.0.0",
+  "description": "Python API version of Toddler Drawing Dreamer",
+  "scripts": {
+    "prestart": "pip3 install -r requirements.txt",
+    "start": "python3 app.py",
+    "dev": "pip3 install -r requirements.txt && python3 app.py"
+  }
+}
