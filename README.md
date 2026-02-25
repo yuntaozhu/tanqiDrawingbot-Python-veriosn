@@ -42,7 +42,9 @@ Generates a line art drawing based on a text prompt.
   "prompt": "一只可爱的小猫",
   "engine": "ideogram", // Optional: "ideogram", "replicate"
   "aspect_ratio": "1:1", // Optional: "1:1", "16:9", "9:16", etc.
-  "num_images": 1 // Optional: number of images to generate
+  "num_images": 1, // Optional: number of images to generate
+  "style": "default", // Optional: "default", "cartoon", "realistic", "watercolor"
+  "apply_line_art": true // Optional: Apply black and white line art filter (default: true)
 }
 ```
 

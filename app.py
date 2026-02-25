@@ -59,11 +59,12 @@ def encode_image_to_base64(img: Image.Image, format: str = "PNG") -> str:
     mime_type = format.lower()
     return f"data:image/{mime_type};base64,{img_str}"
 
-def process_line_art_image(image_url: str, size: int = 448) -> str:
+def process_line_art_image(image_url: str, size: int = 448, apply_filter: bool = True) -> str:
     try:
         img = load_image(image_url)
-        processed_img = apply_line_art_filter(img, size)
-        return encode_image_to_base64(processed_img)
+        if apply_filter:
+            img = apply_line_art_filter(img, size)
+        return encode_image_to_base64(img)
     except Exception as e:
         print(f"Error processing image: {e}")
         return image_url
@@ -120,13 +121,22 @@ class ReplicateAPI:
         except requests.exceptions.RequestException as e:
             raise ConnectionError(f"Replicate API Network Error (Text Gen): {e}")
 
-    def generate_image(self, prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1) -> Optional[List[str]]:
+    def generate_image(self, prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1, style: str = "default") -> Optional[List[str]]:
         if not self.api_key:
             raise ValueError("REPLICATE_API_TOKEN is not set.")
             
         char_context = f"Main character: {protagonist}. " if protagonist else ""
         ref_context = "Maintain visual style of previous drawings. " if ref_image else ""
-        full_prompt = f"{char_context}{ref_context}Scenario: {prompt}. Simple black and white line art, 1-bit color style, binary image, no gray, high contrast, sharp edges, pure white background, centered, vector line style. CRITICAL: NO TEXT, NO ENGLISH WORDS."
+        
+        style_prompts = {
+            "cartoon": "Line art artistic cartoon work, coloring book style",
+            "realistic": "Realistic highly detailed sketch, pencil sketch style",
+            "watercolor": "Watercolor style line art, ink wash, expressive brush strokes",
+            "default": "Simple black and white line art, 1-bit color style, vector line style"
+        }
+        style_prompt = style_prompts.get(style.lower(), style_prompts["default"])
+        
+        full_prompt = f"{char_context}{ref_context}Scenario: {prompt}. {style_prompt}, binary image, no gray, high contrast, sharp edges, pure white background, centered. CRITICAL: NO TEXT, NO ENGLISH WORDS."
         
         url = f"{self.base_url}/models/black-forest-labs/flux-schnell/predictions"
         headers = {
@@ -180,12 +190,20 @@ class IdeogramAPI:
         self.api_key = os.getenv("IDEOGRAM_API_KEY")
         self.base_url = "https://api.ideogram.ai/v1"
 
-    def generate_image(self, prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1) -> Optional[List[str]]:
+    def generate_image(self, prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1, style: str = "default") -> Optional[List[str]]:
         if not self.api_key:
             return None
             
         char_context = f"Main character: {protagonist}. " if protagonist else ""
-        style_keywords = "Line art artistic cartoon work, black and white, coloring book style."
+        
+        style_prompts = {
+            "cartoon": "Line art artistic cartoon work, black and white, coloring book style.",
+            "realistic": "Realistic sketch, highly detailed line art, black and white, pencil sketch style.",
+            "watercolor": "Watercolor style line art, black and white ink wash, expressive brush strokes.",
+            "default": "Simple black and white line art, 1-bit color style, binary image."
+        }
+        style_keywords = style_prompts.get(style.lower(), style_prompts["default"])
+        
         constraints = "CRITICAL: NO TEXT, NO ENGLISH WORDS, white background."
         full_prompt = f"{style_keywords} {char_context} Scenario: {prompt}. {constraints}"
         
@@ -240,8 +258,18 @@ class GenerateRequest(BaseModel):
     seed: Optional[int] = None
     aspect_ratio: str = "1:1"
     num_images: int = 1
+    style: str = "default"
+    apply_line_art: bool = True
 
 # --- API Endpoints ---
+
+@app.get("/")
+async def root():
+    return {"message": "Toddler Drawing Dreamer API is running. See /docs for API documentation."}
+
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
 
 @app.post("/api/generate")
 async def generate_drawing(req: GenerateRequest):
@@ -303,10 +331,10 @@ async def generate_drawing(req: GenerateRequest):
     image_urls = None
     error_detail = None
     if req.engine == "ideogram":
-        image_urls = ideogram_api.generate_image(english_prompt, req.seed, english_protagonist, req.anchorImageBase64, req.aspect_ratio, req.num_images)
+        image_urls = ideogram_api.generate_image(english_prompt, req.seed, english_protagonist, req.anchorImageBase64, req.aspect_ratio, req.num_images, req.style)
     elif req.engine == "replicate":
         try:
-            image_urls = replicate_api.generate_image(english_prompt, req.seed, english_protagonist, req.anchorImageBase64, req.aspect_ratio, req.num_images)
+            image_urls = replicate_api.generate_image(english_prompt, req.seed, english_protagonist, req.anchorImageBase64, req.aspect_ratio, req.num_images, req.style)
         except PermissionError as e:
             print(f"Replicate Auth Error: {e}")
             error_detail = str(e)
@@ -322,13 +350,13 @@ async def generate_drawing(req: GenerateRequest):
         
     if not image_urls and req.engine != "ideogram" and not error_detail:
         print("Fallback to Ideogram")
-        image_urls = ideogram_api.generate_image(english_prompt, req.seed, english_protagonist, req.anchorImageBase64, req.aspect_ratio, req.num_images)
+        image_urls = ideogram_api.generate_image(english_prompt, req.seed, english_protagonist, req.anchorImageBase64, req.aspect_ratio, req.num_images, req.style)
         
     if not image_urls:
         raise HTTPException(status_code=500, detail=error_detail or "Image generation failed")
         
     # 5. Process Image
-    processed_images = [process_line_art_image(url) for url in image_urls]
+    processed_images = [process_line_art_image(url, apply_filter=req.apply_line_art) for url in image_urls]
     
     return {
         "imageUrl": processed_images[0] if processed_images else None,
