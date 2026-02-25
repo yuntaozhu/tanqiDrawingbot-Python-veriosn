@@ -251,6 +251,37 @@ class IdeogramAPI:
             print(f"Ideogram API Error: {response.status_code} {response.text}")
         return None
 
+def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1, style: str = "default", preferred_engine: Optional[str] = None) -> Optional[List[str]]:
+    replicate_api = ReplicateAPI()
+    ideogram_api = IdeogramAPI()
+    
+    # Define available engines and their generation methods
+    engines = [
+        ("ideogram", lambda: ideogram_api.generate_image(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style)),
+        ("replicate", lambda: replicate_api.generate_image(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style))
+    ]
+    
+    # If a preferred engine is specified, try to move it to the front
+    if preferred_engine:
+        preferred = next((e for e in engines if e[0] == preferred_engine), None)
+        if preferred:
+            engines.remove(preferred)
+            engines.insert(0, preferred)
+            
+    for name, generate_func in engines:
+        print(f"Attempting to generate image using: {name}")
+        try:
+            image_urls = generate_func()
+            if image_urls:
+                print(f"Successfully generated image using: {name}")
+                return image_urls
+            else:
+                print(f"Engine {name} returned no images.")
+        except Exception as e:
+            print(f"Engine {name} failed with error: {e}")
+            
+    return None
+
 # --- API Models ---
 
 class GenerateRequest(BaseModel):
@@ -337,32 +368,19 @@ async def generate_drawing(req: GenerateRequest):
             print(f"Protagonist translation failed: {e}")
 
     # 4. Generate Image
-    image_urls = None
-    error_detail = None
-    if req.engine == "ideogram":
-        image_urls = ideogram_api.generate_image(english_prompt, req.seed, english_protagonist, req.anchorImageBase64, req.aspect_ratio, req.num_images, req.style)
-    elif req.engine == "replicate":
-        try:
-            image_urls = replicate_api.generate_image(english_prompt, req.seed, english_protagonist, req.anchorImageBase64, req.aspect_ratio, req.num_images, req.style)
-        except PermissionError as e:
-            print(f"Replicate Auth Error: {e}")
-            error_detail = str(e)
-            image_urls = None
-        except ValueError as e:
-            print(f"Replicate Validation Error: {e}")
-            error_detail = str(e)
-            image_urls = None
-        except Exception as e:
-            print(f"Replicate image generation failed: {e}")
-            error_detail = str(e)
-            image_urls = None
-        
-    if not image_urls and req.engine != "ideogram" and not error_detail:
-        print("Fallback to Ideogram")
-        image_urls = ideogram_api.generate_image(english_prompt, req.seed, english_protagonist, req.anchorImageBase64, req.aspect_ratio, req.num_images, req.style)
-        
+    image_urls = generate_image_with_fallback(
+        english_prompt, 
+        req.seed, 
+        english_protagonist, 
+        req.anchorImageBase64, 
+        req.aspect_ratio, 
+        req.num_images, 
+        req.style, 
+        preferred_engine=req.engine
+    )
+
     if not image_urls:
-        raise HTTPException(status_code=500, detail=error_detail or "Image generation failed")
+        raise HTTPException(status_code=500, detail="Image generation failed with all available engines.")
         
     # 5. Process Image
     processed_images = [process_line_art_image(url, apply_filter=req.apply_line_art) for url in image_urls]
@@ -436,13 +454,9 @@ async def process_gemini_interaction(prompt_part: Any, api_key: str) -> Dict[str
                     replicate_api = ReplicateAPI()
                     english_prompt = replicate_api.generate_text(f"Translate the following text into English. Output ONLY the English translation, no other text. Text: {prompt}")
                     
-                    # Generate image using Ideogram (or Replicate as fallback)
-                    ideogram_api = IdeogramAPI()
-                    image_urls = ideogram_api.generate_image(english_prompt)
+                    # Generate image using fallback mechanism
+                    image_urls = generate_image_with_fallback(english_prompt)
                     
-                    if not image_urls:
-                        image_urls = replicate_api.generate_image(english_prompt)
-                        
                     if image_urls:
                         # Process the image for printing
                         processed_image = process_line_art_image(image_urls[0])
