@@ -23,6 +23,34 @@ except ImportError:
     IS_MICROPYTHON = False
 
 # -----------------------------------------------------------------------------
+# Optional Audio Recording
+# -----------------------------------------------------------------------------
+try:
+    import sounddevice as sd
+    import numpy as np
+    from scipy.io.wavfile import write as write_wav
+    HAS_AUDIO_INPUT = True
+except ImportError:
+    HAS_AUDIO_INPUT = False
+    print("Note: Install 'sounddevice', 'numpy', and 'scipy' to enable microphone recording.")
+
+def record_audio(filename="voice_input.wav", duration=5, fs=16000):
+    if not HAS_AUDIO_INPUT:
+        print("Microphone recording not available. Please install dependencies.")
+        return None
+        
+    print(f"Recording for {duration} seconds... Speak now!")
+    try:
+        recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
+        sd.wait()  # Wait until recording is finished
+        write_wav(filename, fs, recording)
+        print(f"Saved recording to {filename}")
+        return filename
+    except Exception as e:
+        print(f"Recording failed: {e}")
+        return None
+
+# -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
 BASE_URL = 'http://localhost:3000' 
@@ -248,8 +276,10 @@ def main():
     print("2. Automated Voice Test (Sends dummy audio)")
     print("3. Send Voice File (WAV)")
     print("4. Poll Only")
+    if HAS_AUDIO_INPUT:
+        print("5. Record from Microphone (5s)")
     
-    mode = input("Enter mode (1/2/3/4): ").strip()
+    mode = input("Enter mode (1/2/3/4/5): ").strip()
     
     if mode == "1":
         log("Entering Interactive Chat Mode. Type 'exit' to quit.")
@@ -308,6 +338,16 @@ def main():
                 time.sleep(POLL_INTERVAL)
         except KeyboardInterrupt:
             log("Stopped.")
+            
+    elif mode == "5" and HAS_AUDIO_INPUT:
+        while True:
+            filename = record_audio()
+            if filename:
+                send_voice_file(filename)
+            
+            cont = input("Record again? (y/n): ").strip().lower()
+            if cont != 'y':
+                break
 
 if __name__ == '__main__':
     main()

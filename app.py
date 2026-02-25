@@ -440,7 +440,12 @@ async def process_gemini_interaction(prompt_part: Any, api_key: str) -> Dict[str
             )
         )
         
-        text_response = response.text or ""
+        text_response = ""
+        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if part.text:
+                    text_response += part.text
+        
         action = None
         
         if response.function_calls:
