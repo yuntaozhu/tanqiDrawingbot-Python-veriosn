@@ -199,6 +199,40 @@ def save_image(data_uri, job_id):
     except Exception as e:
         log(f"Failed to save image: {e}")
 
+def send_voice_file(filepath):
+    """
+    Sends a WAV file to the voice endpoint.
+    """
+    url = f"{BASE_URL}/api/device/v1/voice"
+    
+    try:
+        with open(filepath, "rb") as f:
+            audio_data = f.read()
+            
+        log(f"Sending voice file: {filepath} ({len(audio_data)} bytes)...")
+        
+        res = requests.post(url, data=audio_data, headers=get_headers('audio/wav'))
+        
+        if res.status_code == 200:
+            data = res.json()
+            log("--- Voice Response ---")
+            log(f"Text: {data.get('text_response')}")
+            action = data.get('action')
+            if action:
+                log(f"Action: {action.get('type')} - {action.get('prompt')}")
+                image_url = action.get('image_url')
+                if image_url and image_url.startswith('data:image'):
+                    save_image(image_url, action.get('job_id'))
+            res.close()
+            return data
+        else:
+            log(f"Error {res.status_code} in Voice: {res.text[:100]}")
+            res.close()
+            return None
+    except Exception as e:
+        log(f"Exception sending voice file: {e}")
+        return None
+
 # -----------------------------------------------------------------------------
 # Main Test Loop
 # -----------------------------------------------------------------------------
@@ -212,9 +246,10 @@ def main():
     print("\nSelect Mode:")
     print("1. Interactive Chat (Type commands)")
     print("2. Automated Voice Test (Sends dummy audio)")
-    print("3. Poll Only")
+    print("3. Send Voice File (WAV)")
+    print("4. Poll Only")
     
-    mode = input("Enter mode (1/2/3): ").strip()
+    mode = input("Enter mode (1/2/3/4): ").strip()
     
     if mode == "1":
         log("Entering Interactive Chat Mode. Type 'exit' to quit.")
@@ -252,8 +287,13 @@ def main():
                 
         except KeyboardInterrupt:
             log("Test stopped by user.")
-            
+
     elif mode == "3":
+        filepath = input("Enter path to WAV file: ").strip()
+        if filepath:
+            send_voice_file(filepath)
+            
+    elif mode == "4":
         log(f"Starting Polling Loop (Interval: {POLL_INTERVAL}s)")
         try:
             while True:

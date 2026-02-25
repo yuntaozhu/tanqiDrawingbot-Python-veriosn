@@ -435,7 +435,7 @@ async def process_gemini_interaction(prompt_part: Any, api_key: str) -> Dict[str
             model='gemini-2.5-flash',
             contents=[prompt_part],
             config=types.GenerateContentConfig(
-                system_instruction="You are a gentle kindergarten teacher named 'Xiao Yi'. Speak in Chinese. If the child asks to draw something, call the generate_drawing function. Keep responses short and sweet.",
+                system_instruction="You are a gentle kindergarten teacher named 'Tanqi' (探奇). Speak in Chinese. If the child asks to draw something, call the generate_drawing function. Keep responses short and sweet.",
                 tools=[types.Tool(function_declarations=[generate_drawing_tool])]
             )
         )
