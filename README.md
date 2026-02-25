@@ -48,7 +48,22 @@ Generates a line art drawing based on a text prompt.
 }
 ```
 
-### 2. Voice Command (Device API)
+### 2. Submit Feedback
+`POST /api/feedback`
+
+Submit user feedback (rating or like/dislike) for a generated image.
+
+**Request Body:**
+```json
+{
+  "generation_id": "uuid-returned-from-generate",
+  "rating": 5, // Integer rating (e.g., 1-5)
+  "liked": true, // Optional boolean
+  "comments": "Great drawing!" // Optional text
+}
+```
+
+### 3. Voice Command (Device API)
 `POST /api/device/v1/voice`
 
 Handles voice commands from the device.
@@ -59,7 +74,7 @@ Handles voice commands from the device.
 **Request Body:**
 Raw audio data (WAV format)
 
-### 3. Check Print Jobs (Device API)
+### 4. Check Print Jobs (Device API)
 `GET /api/device/v1/print-jobs`
 
 Checks for pending print jobs.
@@ -67,7 +82,7 @@ Checks for pending print jobs.
 **Headers:**
 - `x-device-token`: Your device token
 
-### 4. Complete Print Job (Device API)
+### 5. Complete Print Job (Device API)
 `POST /api/device/v1/print-jobs/{job_id}/complete`
 
 Marks a print job as complete.

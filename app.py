@@ -33,6 +33,9 @@ app.add_middleware(
 # In-memory store for print jobs
 print_jobs = []
 
+# In-memory store for feedback (in a real app, use a database)
+feedback_store = []
+
 # --- Helper Functions ---
 
 def load_image(image_url: str) -> Image.Image:
@@ -261,6 +264,12 @@ class GenerateRequest(BaseModel):
     style: str = "default"
     apply_line_art: bool = True
 
+class FeedbackRequest(BaseModel):
+    generation_id: str
+    rating: int  # e.g., 1 to 5
+    liked: Optional[bool] = None
+    comments: Optional[str] = None
+
 # --- API Endpoints ---
 
 @app.get("/")
@@ -358,7 +367,10 @@ async def generate_drawing(req: GenerateRequest):
     # 5. Process Image
     processed_images = [process_line_art_image(url, apply_filter=req.apply_line_art) for url in image_urls]
     
+    generation_id = str(uuid.uuid4())
+    
     return {
+        "generationId": generation_id,
         "imageUrl": processed_images[0] if processed_images else None,
         "imageUrls": processed_images,
         "protagonist": protagonist,
@@ -366,20 +378,23 @@ async def generate_drawing(req: GenerateRequest):
         "prompt": req.prompt
     }
 
-@app.post("/api/device/v1/voice")
-async def handle_voice(request: Request):
-    token = request.headers.get("x-device-token")
-    if not token:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-        
-    body = await request.body()
-    if not body:
-        raise HTTPException(status_code=400, detail="Empty audio body received")
-        
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY or API_KEY is missing")
-        
+@app.post("/api/feedback")
+async def submit_feedback(req: FeedbackRequest):
+    feedback_entry = {
+        "generation_id": req.generation_id,
+        "rating": req.rating,
+        "liked": req.liked,
+        "comments": req.comments,
+        "timestamp": time.time()
+    }
+    feedback_store.append(feedback_entry)
+    
+    # In a real application, you would save this to a database
+    # and use it to fine-tune models or adjust prompts.
+    
+    return {"success": True, "message": "Feedback received"}
+
+async def process_gemini_interaction(prompt_part: Any, api_key: str) -> Dict[str, Any]:
     client = genai.Client(api_key=api_key)
     
     generate_drawing_tool = types.FunctionDeclaration(
@@ -400,9 +415,7 @@ async def handle_voice(request: Request):
     try:
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[
-                types.Part.from_bytes(data=body, mime_type='audio/wav')
-            ],
+            contents=[prompt_part],
             config=types.GenerateContentConfig(
                 system_instruction="You are a gentle kindergarten teacher named 'Xiao Yi'. Speak in Chinese. If the child asks to draw something, call the generate_drawing function. Keep responses short and sweet.",
                 tools=[types.Tool(function_declarations=[generate_drawing_tool])]
@@ -442,7 +455,7 @@ async def handle_voice(request: Request):
                             "timestamp": time.time()
                         })
                         
-                        action = {"type": "print", "prompt": prompt, "job_id": job_id}
+                        action = {"type": "print", "prompt": prompt, "job_id": job_id, "image_url": processed_image}
                         if not text_response:
                             text_response = f"好的，我这就画一张{prompt}。"
                     else:
@@ -460,8 +473,40 @@ async def handle_voice(request: Request):
             "audio_base64": None
         }
     except Exception as e:
-        print(f"Voice Handler Error: {e}")
+        print(f"Gemini Handler Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+class ChatRequest(BaseModel):
+    text: str
+
+@app.post("/api/device/v1/chat")
+async def handle_chat(req: ChatRequest, request: Request):
+    token = request.headers.get("x-device-token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+        
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY or API_KEY is missing")
+        
+    return await process_gemini_interaction(req.text, api_key)
+
+@app.post("/api/device/v1/voice")
+async def handle_voice(request: Request):
+    token = request.headers.get("x-device-token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+        
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty audio body received")
+        
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY or API_KEY is missing")
+        
+    prompt_part = types.Part.from_bytes(data=body, mime_type='audio/wav')
+    return await process_gemini_interaction(prompt_part, api_key)
 
 @app.get("/api/device/v1/print-jobs")
 async def get_print_jobs(request: Request):

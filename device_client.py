@@ -157,6 +157,48 @@ def complete_print_job(job_id):
     except Exception as e:
         log(f"Exception completing job: {e}")
 
+def send_chat_command(text):
+    """
+    Sends text to the chat endpoint.
+    """
+    url = f"{BASE_URL}/api/device/v1/chat"
+    
+    log(f"Sending text: {text}")
+    
+    try:
+        res = requests.post(url, json={"text": text}, headers=get_headers())
+        
+        if res.status_code == 200:
+            data = res.json()
+            log("--- Chat Response ---")
+            log(f"Text: {data.get('text_response')}")
+            action = data.get('action')
+            if action:
+                log(f"Action: {action.get('type')} - {action.get('prompt')}")
+                image_url = action.get('image_url')
+                if image_url and image_url.startswith('data:image'):
+                    save_image(image_url, action.get('job_id'))
+            res.close()
+            return data
+        else:
+            log(f"Error {res.status_code} in Chat: {res.text[:100]}")
+            res.close()
+            return None
+    except Exception as e:
+        log(f"Exception in chat request: {e}")
+        return None
+
+def save_image(data_uri, job_id):
+    try:
+        header, encoded = data_uri.split(",", 1)
+        data = binascii.a2b_base64(encoded)
+        filename = f"drawing_{job_id}.png"
+        with open(filename, "wb") as f:
+            f.write(data)
+        log(f"Saved image to {filename}")
+    except Exception as e:
+        log(f"Failed to save image: {e}")
+
 # -----------------------------------------------------------------------------
 # Main Test Loop
 # -----------------------------------------------------------------------------
@@ -167,28 +209,65 @@ def main():
     log(f"   Target: {BASE_URL}")
     log("=======================================")
     
-    # 1. Test Voice
-    log("1. Testing Voice Interaction...")
-    send_voice_command()
+    print("\nSelect Mode:")
+    print("1. Interactive Chat (Type commands)")
+    print("2. Automated Voice Test (Sends dummy audio)")
+    print("3. Poll Only")
     
-    # 2. Start Polling
-    log(f"2. Starting Polling Loop (Interval: {POLL_INTERVAL}s)")
-    log("   Press Ctrl+C to stop.")
+    mode = input("Enter mode (1/2/3): ").strip()
     
-    try:
+    if mode == "1":
+        log("Entering Interactive Chat Mode. Type 'exit' to quit.")
         while True:
-            job = check_print_jobs()
+            text = input("\nYou: ").strip()
+            if text.lower() == 'exit':
+                break
+            if text:
+                send_chat_command(text)
+                
+    elif mode == "2":
+        # 1. Test Voice
+        log("1. Testing Voice Interaction...")
+        send_voice_command()
+        
+        # 2. Start Polling
+        log(f"2. Starting Polling Loop (Interval: {POLL_INTERVAL}s)")
+        log("   Press Ctrl+C to stop.")
+        
+        try:
+            while True:
+                job = check_print_jobs()
+                
+                if job:
+                    log(f"Processing Image Job: {job.get('job_id')}")
+                    image_url = job.get('image_url')
+                    if image_url and image_url.startswith('data:image'):
+                         save_image(image_url, job.get('job_id'))
+                    
+                    log("Simulating print delay (3s)...")
+                    time.sleep(3)
+                    complete_print_job(job['job_id'])
+                
+                time.sleep(POLL_INTERVAL)
+                
+        except KeyboardInterrupt:
+            log("Test stopped by user.")
             
-            if job:
-                log(f"Processing Image: {job.get('image_url')}")
-                log("Simulating print delay (3s)...")
-                time.sleep(3)
-                complete_print_job(job['job_id'])
-            
-            time.sleep(POLL_INTERVAL)
-            
-    except KeyboardInterrupt:
-        log("Test stopped by user.")
+    elif mode == "3":
+        log(f"Starting Polling Loop (Interval: {POLL_INTERVAL}s)")
+        try:
+            while True:
+                job = check_print_jobs()
+                if job:
+                    log(f"Processing Image Job: {job.get('job_id')}")
+                    image_url = job.get('image_url')
+                    if image_url and image_url.startswith('data:image'):
+                         save_image(image_url, job.get('job_id'))
+                    time.sleep(3)
+                    complete_print_job(job['job_id'])
+                time.sleep(POLL_INTERVAL)
+        except KeyboardInterrupt:
+            log("Stopped.")
 
 if __name__ == '__main__':
     main()
