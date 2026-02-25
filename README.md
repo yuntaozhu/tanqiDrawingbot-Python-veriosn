@@ -40,7 +40,9 @@ Generates a line art drawing based on a text prompt.
 ```json
 {
   "prompt": "一只可爱的小猫",
-  "engine": "ideogram" // Optional: "ideogram", "replicate"
+  "engine": "ideogram", // Optional: "ideogram", "replicate"
+  "aspect_ratio": "1:1", // Optional: "1:1", "16:9", "9:16", etc.
+  "num_images": 1 // Optional: number of images to generate
 }
 ```
 
