@@ -63,7 +63,18 @@ Submit user feedback (rating or like/dislike) for a generated image.
 }
 ```
 
-### 3. Voice Command (Device API)
+### 3. Get Generation History
+`GET /api/history`
+
+Retrieve the history of generated images.
+
+**Query Parameters:**
+- `limit`: Optional integer to limit the number of results (default: 50)
+
+**Response:**
+Returns an array of generation objects, sorted by timestamp descending.
+
+### 4. Voice Command (Device API)
 `POST /api/device/v1/voice`
 
 Handles voice commands from the device.
@@ -74,7 +85,7 @@ Handles voice commands from the device.
 **Request Body:**
 Raw audio data (WAV format)
 
-### 4. Check Print Jobs (Device API)
+### 5. Check Print Jobs (Device API)
 `GET /api/device/v1/print-jobs`
 
 Checks for pending print jobs.
@@ -82,7 +93,7 @@ Checks for pending print jobs.
 **Headers:**
 - `x-device-token`: Your device token
 
-### 5. Complete Print Job (Device API)
+### 6. Complete Print Job (Device API)
 `POST /api/device/v1/print-jobs/{job_id}/complete`
 
 Marks a print job as complete.

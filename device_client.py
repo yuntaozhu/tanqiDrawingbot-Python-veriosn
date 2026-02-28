@@ -41,8 +41,9 @@ def record_audio(filename="voice_input.wav", duration=5, fs=16000):
         
     print(f"Recording for {duration} seconds... Speak now!")
     try:
-        recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
-        sd.wait()  # Wait until recording is finished
+        import sounddevice as sd_internal
+        recording = sd_internal.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
+        sd_internal.wait()  # Wait until recording is finished
         write_wav(filename, fs, recording)
         print(f"Saved recording to {filename}")
         return filename
@@ -65,6 +66,7 @@ def create_dummy_wav(duration_sec=1):
     """
     Generates a valid 16-bit PCM, 16kHz Mono WAV header + silence/noise.
     """
+    duration_sec = int(duration_sec)
     sample_rate = 16000
     num_channels = 1
     bits_per_sample = 16

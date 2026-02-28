@@ -36,6 +36,9 @@ print_jobs = []
 # In-memory store for feedback (in a real app, use a database)
 feedback_store = []
 
+# In-memory store for generation history
+generation_history = []
+
 # --- Helper Functions ---
 
 def load_image(image_url: str) -> Image.Image:
@@ -387,6 +390,23 @@ async def generate_drawing(req: GenerateRequest):
     
     generation_id = str(uuid.uuid4())
     
+    # Save to history
+    history_entry = {
+        "generation_id": generation_id,
+        "prompt": req.prompt,
+        "english_prompt": english_prompt,
+        "engine": req.engine,
+        "protagonist": protagonist,
+        "title": title,
+        "aspect_ratio": req.aspect_ratio,
+        "num_images": req.num_images,
+        "style": req.style,
+        "apply_line_art": req.apply_line_art,
+        "image_urls": processed_images,
+        "timestamp": time.time()
+    }
+    generation_history.append(history_entry)
+    
     return {
         "generationId": generation_id,
         "imageUrl": processed_images[0] if processed_images else None,
@@ -411,6 +431,12 @@ async def submit_feedback(req: FeedbackRequest):
     # and use it to fine-tune models or adjust prompts.
     
     return {"success": True, "message": "Feedback received"}
+
+@app.get("/api/history")
+async def get_history(limit: int = 50):
+    # Return history sorted by timestamp descending
+    sorted_history = sorted(generation_history, key=lambda x: x["timestamp"], reverse=True)
+    return sorted_history[:limit]
 
 async def process_gemini_interaction(prompt_part: Any, api_key: str) -> Dict[str, Any]:
     client = genai.Client(api_key=api_key)
@@ -475,6 +501,25 @@ async def process_gemini_interaction(prompt_part: Any, api_key: str) -> Dict[str
                         })
                         
                         action = {"type": "print", "prompt": prompt, "job_id": job_id, "image_url": processed_image}
+                        
+                        # Save to history
+                        generation_id = str(uuid.uuid4())
+                        history_entry = {
+                            "generation_id": generation_id,
+                            "prompt": prompt,
+                            "english_prompt": english_prompt,
+                            "engine": "voice/chat",
+                            "protagonist": None,
+                            "title": f"🎨 {prompt}",
+                            "aspect_ratio": "1:1",
+                            "num_images": 1,
+                            "style": "default",
+                            "apply_line_art": True,
+                            "image_urls": [processed_image],
+                            "timestamp": time.time()
+                        }
+                        generation_history.append(history_entry)
+                        
                         if not text_response:
                             text_response = f"好的，我这就画一张{prompt}。"
                     else:
