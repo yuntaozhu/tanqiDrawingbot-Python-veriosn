@@ -3,9 +3,11 @@
   "version": "1.0.0",
   "description": "Python API version of Toddler Drawing Dreamer",
   "scripts": {
-    "prestart": "pip3 install -r requirements.txt",
+    "prestart": "python3 -m py_compile app.py",
     "start": "python3 app.py",
-    "dev": "pip3 install -r requirements.txt && python3 app.py"
+    "dev": "python3 -m py_compile app.py && python3 app.py",
+    "build": "python3 -m py_compile app.py",
+    "lint": "python3 -m py_compile app.py"
   },
   "dependencies": {
     "replicate": "^1.4.0"

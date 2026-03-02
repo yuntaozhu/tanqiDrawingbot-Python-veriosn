@@ -51,21 +51,23 @@ def load_image(image_url: str) -> Image.Image:
         response.raise_for_status()
         return Image.open(io.BytesIO(response.content)).convert('RGB')
 
-def apply_line_art_filter(img: Image.Image, size: int = 448) -> Image.Image:
+def apply_line_art_filter(img: Image.Image, size: int = 320) -> Image.Image:
     img = img.resize((size, size))
     img_np = np.array(img)
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
-    return Image.fromarray(thresh)
+    return Image.fromarray(thresh).convert('1')
 
-def encode_image_to_base64(img: Image.Image, format: str = "PNG") -> str:
+def encode_image_to_base64(img: Image.Image, format: str = "BMP") -> str:
     buffered = io.BytesIO()
     img.save(buffered, format=format)
     img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
     mime_type = format.lower()
+    if mime_type == "bmp":
+        mime_type = "x-ms-bmp"
     return f"data:image/{mime_type};base64,{img_str}"
 
-def process_line_art_image(image_url: str, size: int = 448, apply_filter: bool = True) -> str:
+def process_line_art_image(image_url: str, size: int = 320, apply_filter: bool = True) -> str:
     try:
         img = load_image(image_url)
         if apply_filter:
@@ -615,7 +617,12 @@ async def complete_print_job(job_id: str, request: Request):
         
     global print_jobs
     print_jobs = [job for job in print_jobs if job["job_id"] != job_id]
-    return {"success": True}
+    return {
+        "success": True,
+        "message": "Print job completed successfully",
+        "job_id": job_id,
+        "status": "finished"
+    }
 
 if __name__ == "__main__":
     import uvicorn
