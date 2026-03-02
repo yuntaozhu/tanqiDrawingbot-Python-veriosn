@@ -13,8 +13,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import requests
 import replicate
-from google import genai
-from google.genai import types
+from openai import OpenAI
 from PIL import Image
 import numpy as np
 import cv2
@@ -85,6 +84,16 @@ class ReplicateAPI:
             os.environ["REPLICATE_API_TOKEN"] = self.api_key
 
     def generate_text(self, prompt: str, max_tokens: int = 100) -> str:
+        # Try DeepSeek first if available, as it's more reliable in China
+        deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+        if deepseek_key:
+            try:
+                ds = DeepSeekAPI()
+                res = ds.generate_text(prompt)
+                return res.get("text", "").strip()
+            except Exception as e:
+                print(f"DeepSeek translation fallback error: {e}")
+
         if not self.api_key:
             raise ValueError("REPLICATE_API_TOKEN is not set.")
         
@@ -388,46 +397,109 @@ async def get_history(limit: int = 50):
     sorted_history = sorted(generation_history, key=lambda x: x["timestamp"], reverse=True)
     return sorted_history[:limit]
 
-async def process_gemini_interaction(prompt_part: Any, api_key: str) -> Dict[str, Any]:
-    client = genai.Client(api_key=api_key)
+class DeepSeekAPI:
+    def __init__(self):
+        self.api_key = os.getenv("DEEPSEEK_API_KEY")
+        self.base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
+
+    def generate_text(self, prompt: str, system_instruction: str = "You are a helpful assistant.", tools: List[Dict] = None) -> Dict[str, Any]:
+        if not self.client:
+            raise ValueError("DEEPSEEK_API_KEY is not set.")
+        
+        messages = [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            kwargs = {
+                "model": "deepseek-chat",
+                "messages": messages,
+            }
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+
+            response = self.client.chat.completions.create(**kwargs)
+            message = response.choices[0].message
+            
+            return {
+                "text": message.content,
+                "tool_calls": message.tool_calls
+            }
+        except Exception as e:
+            raise RuntimeError(f"DeepSeek API Error: {e}")
+
+    def transcribe_audio(self, audio_bytes: bytes) -> str:
+        # Using OpenAI Whisper compatible API for STT
+        # Many China-based relays provide this, or use a dedicated provider
+        stt_api_key = os.getenv("STT_API_KEY") or self.api_key
+        stt_base_url = os.getenv("STT_BASE_URL") or self.base_url
+        stt_client = OpenAI(api_key=stt_api_key, base_url=stt_base_url)
+        
+        try:
+            # Create a file-like object from bytes
+            audio_file = io.BytesIO(audio_bytes)
+            audio_file.name = "audio.wav"
+            
+            transcript = stt_client.audio.transcriptions.create(
+                model="whisper-1", 
+                file=audio_file
+            )
+            return transcript.text
+        except Exception as e:
+            print(f"STT Error: {e}")
+            return ""
+
+async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, Any]:
+    deepseek = DeepSeekAPI()
     
-    generate_drawing_tool = types.FunctionDeclaration(
-        name="generate_drawing",
-        description="Generate a black and white line art drawing for kids based on the prompt.",
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "prompt": types.Schema(
-                    type=types.Type.STRING,
-                    description="Visual description of the drawing for children."
-                )
-            },
-            required=["prompt"]
-        )
-    )
+    # Handle audio input if prompt_input is bytes
+    user_text = prompt_input
+    if isinstance(prompt_input, bytes):
+        user_text = deepseek.transcribe_audio(prompt_input)
+        if not user_text:
+            return {
+                "text_response": "我没听清，请再说一遍。",
+                "action": None,
+                "audio_base64": None
+            }
+
+    system_instruction = "You are a gentle kindergarten teacher named 'Tanqi' (探奇). Speak in Chinese. If the child asks to draw something, call the generate_drawing function. Keep responses short and sweet."
+    
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "generate_drawing",
+                "description": "Generate a black and white line art drawing for kids based on the prompt.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "Visual description of the drawing for children."
+                        }
+                    },
+                    "required": ["prompt"]
+                }
+            }
+        }
+    ]
     
     try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[prompt_part],
-            config=types.GenerateContentConfig(
-                system_instruction="You are a gentle kindergarten teacher named 'Tanqi' (探奇). Speak in Chinese. If the child asks to draw something, call the generate_drawing function. Keep responses short and sweet.",
-                tools=[types.Tool(function_declarations=[generate_drawing_tool])]
-            )
-        )
-        
-        text_response = ""
-        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-            for part in response.candidates[0].content.parts:
-                if part.text:
-                    text_response += part.text
+        res = deepseek.generate_text(user_text, system_instruction=system_instruction, tools=tools)
+        text_response = res.get("text") or ""
+        tool_calls = res.get("tool_calls")
         
         action = None
         
-        if response.function_calls:
-            call = response.function_calls[0]
-            if call.name == "generate_drawing":
-                prompt = call.args.get("prompt")
+        if tool_calls:
+            call = tool_calls[0]
+            if call.function.name == "generate_drawing":
+                args = json.loads(call.function.arguments)
+                prompt = args.get("prompt")
                 
                 # Actually generate the drawing
                 try:
@@ -487,7 +559,7 @@ async def process_gemini_interaction(prompt_part: Any, api_key: str) -> Dict[str
             "audio_base64": None
         }
     except Exception as e:
-        print(f"Gemini Handler Error: {e}")
+        print(f"LLM Handler Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 class ChatRequest(BaseModel):
@@ -499,11 +571,11 @@ async def handle_chat(req: ChatRequest, request: Request):
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
         
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
+    api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY or API_KEY is missing")
+        raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY or API_KEY is missing")
         
-    return await process_gemini_interaction(req.text, api_key)
+    return await process_llm_interaction(req.text, api_key)
 
 @app.post("/api/device/v1/voice")
 async def handle_voice(request: Request):
@@ -515,12 +587,11 @@ async def handle_voice(request: Request):
     if not body:
         raise HTTPException(status_code=400, detail="Empty audio body received")
         
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
+    api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY or API_KEY is missing")
+        raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY or API_KEY is missing")
         
-    prompt_part = types.Part.from_bytes(data=body, mime_type='audio/wav')
-    return await process_gemini_interaction(prompt_part, api_key)
+    return await process_llm_interaction(body, api_key)
 
 @app.get("/api/device/v1/print-jobs")
 async def get_print_jobs(request: Request):
