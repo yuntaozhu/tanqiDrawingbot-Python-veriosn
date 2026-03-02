@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import requests
+import replicate
 from google import genai
 from google.genai import types
 from PIL import Image
@@ -80,52 +81,26 @@ def process_line_art_image(image_url: str, size: int = 448, apply_filter: bool =
 class ReplicateAPI:
     def __init__(self):
         self.api_key = os.getenv("REPLICATE_API_TOKEN")
-        self.base_url = "https://api.replicate.com/v1"
+        if self.api_key:
+            os.environ["REPLICATE_API_TOKEN"] = self.api_key
 
     def generate_text(self, prompt: str, max_tokens: int = 100) -> str:
         if not self.api_key:
             raise ValueError("REPLICATE_API_TOKEN is not set.")
-        url = f"{self.base_url}/models/meta/meta-llama-3-8b-instruct/predictions"
-        headers = {
-            "Authorization": f"Token {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "input": {
-                "prompt": prompt,
-                "max_tokens": max_tokens,
-                "temperature": 0.1,
-                "top_p": 0.9
-            }
-        }
+        
         try:
-            response = requests.post(url, headers=headers, json=data, timeout=10)
-            if response.status_code == 401:
-                raise PermissionError("Replicate API Error: Unauthorized. Check your REPLICATE_API_TOKEN.")
-            elif response.status_code == 422:
-                raise ValueError(f"Replicate API Error: Unprocessable Entity. Invalid input data. Response: {response.text}")
-            elif response.status_code != 201:
-                raise RuntimeError(f"Replicate API Error (Text Gen): Status {response.status_code}, Response: {response.text}")
-            
-            prediction = response.json()
-            poll_url = prediction.get("urls", {}).get("get")
-            if not poll_url:
-                raise RuntimeError("Replicate API Error: No polling URL returned.")
-            
-            for _ in range(60):
-                time.sleep(1)
-                poll_resp = requests.get(poll_url, headers=headers, timeout=10)
-                if poll_resp.status_code == 200:
-                    result = poll_resp.json()
-                    if result.get("status") == "succeeded":
-                        return "".join(result.get("output", [])).strip()
-                    elif result.get("status") in ["failed", "canceled"]:
-                        raise RuntimeError(f"Replicate API Error: Prediction {result.get('status')}. Details: {result.get('error')}")
-                else:
-                    print(f"Replicate API Polling Error: Status {poll_resp.status_code}")
-            raise TimeoutError("Replicate API Error: Polling timed out after 60 seconds.")
-        except requests.exceptions.RequestException as e:
-            raise ConnectionError(f"Replicate API Network Error (Text Gen): {e}")
+            output = replicate.run(
+                "meta/meta-llama-3-8b-instruct",
+                input={
+                    "prompt": prompt,
+                    "max_tokens": max_tokens,
+                    "temperature": 0.1,
+                    "top_p": 0.9
+                }
+            )
+            return "".join(output).strip()
+        except Exception as e:
+            raise RuntimeError(f"Replicate API Error (Text Gen): {e}")
 
     def generate_image(self, prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1, style: str = "default") -> Optional[List[str]]:
         if not self.api_key:
@@ -144,52 +119,26 @@ class ReplicateAPI:
         
         full_prompt = f"{char_context}{ref_context}Scenario: {prompt}. {style_prompt}, binary image, no gray, high contrast, sharp edges, pure white background, centered. CRITICAL: NO TEXT, NO ENGLISH WORDS."
         
-        url = f"{self.base_url}/models/black-forest-labs/flux-schnell/predictions"
-        headers = {
-            "Authorization": f"Token {self.api_key}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "input": {
+        try:
+            input_data = {
                 "prompt": full_prompt,
                 "aspect_ratio": aspect_ratio,
-                "num_outputs": num_images,
-                "go_fast": True,
-                "megapixels": "1"
             }
-        }
-        if seed is not None:
-            data["input"]["seed"] = seed
-            
-        try:
-            response = requests.post(url, headers=headers, json=data, timeout=10)
-            if response.status_code == 401:
-                raise PermissionError("Replicate API Error: Unauthorized. Check your REPLICATE_API_TOKEN.")
-            elif response.status_code == 422:
-                raise ValueError(f"Replicate API Error: Unprocessable Entity. Invalid input data. Response: {response.text}")
-            elif response.status_code != 201:
-                raise RuntimeError(f"Replicate API Error (Image Gen): Status {response.status_code}, Response: {response.text}")
+            if seed is not None:
+                input_data["seed"] = seed
                 
-            prediction = response.json()
-            poll_url = prediction.get("urls", {}).get("get")
-            if not poll_url:
-                raise RuntimeError("Replicate API Error: No polling URL returned.")
+            # Using bytedance/seedream-4 as requested
+            output = replicate.run(
+                "bytedance/seedream-4",
+                input=input_data
+            )
             
-            for _ in range(60):
-                time.sleep(1)
-                poll_resp = requests.get(poll_url, headers=headers, timeout=10)
-                if poll_resp.status_code == 200:
-                    result = poll_resp.json()
-                    if result.get("status") == "succeeded":
-                        output = result.get("output")
-                        return output if isinstance(output, list) else [output]
-                    elif result.get("status") in ["failed", "canceled"]:
-                        raise RuntimeError(f"Replicate API Error: Prediction {result.get('status')}. Details: {result.get('error')}")
-                else:
-                    print(f"Replicate API Polling Error: Status {poll_resp.status_code}")
-            raise TimeoutError("Replicate API Error: Polling timed out after 60 seconds.")
-        except requests.exceptions.RequestException as e:
-            raise ConnectionError(f"Replicate API Network Error (Image Gen): {e}")
+            # The output for seedream-4 is typically a list of File objects or URLs
+            if isinstance(output, list):
+                return [str(item) for item in output]
+            return [str(output)]
+        except Exception as e:
+            raise RuntimeError(f"Replicate API Error (Image Gen): {e}")
 
 class IdeogramAPI:
     def __init__(self):
@@ -259,9 +208,10 @@ def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protag
     ideogram_api = IdeogramAPI()
     
     # Define available engines and their generation methods
+    # Prioritize replicate as requested
     engines = [
-        ("ideogram", lambda: ideogram_api.generate_image(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style)),
-        ("replicate", lambda: replicate_api.generate_image(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style))
+        ("replicate", lambda: replicate_api.generate_image(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style)),
+        ("ideogram", lambda: ideogram_api.generate_image(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style))
     ]
     
     # If a preferred engine is specified, try to move it to the front
@@ -289,7 +239,7 @@ def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protag
 
 class GenerateRequest(BaseModel):
     prompt: str
-    engine: str = "ideogram"
+    engine: str = "replicate"
     protagonist: Optional[str] = None
     anchorImageBase64: Optional[str] = None
     seed: Optional[int] = None
