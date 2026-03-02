@@ -31,7 +31,8 @@
     "type": "print",
     "prompt": "小兔子",
     "job_id": "uuid-string",
-    "image_url": "data:image/x-ms-bmp;base64,..."
+    "image_url": "data:image/x-ms-bmp;base64,...",
+    "bitmap_hex": "00ff00ff..."
   },
   "audio_base64": null
 }
@@ -66,6 +67,7 @@
   "has_job": true,
   "job_id": "uuid-string",
   "image_url": "data:image/x-ms-bmp;base64,...",
+  "bitmap_hex": "00ff00ff...",
   "prompt": "小兔子",
   "timestamp": 1708800000.0
 }
@@ -87,7 +89,10 @@
 - **响应示例**:
 ```json
 {
-  "success": true
+  "success": true,
+  "message": "Print job completed successfully",
+  "job_id": "uuid-string",
+  "status": "finished"
 }
 ```
 
@@ -96,7 +101,7 @@
 ## 3. 嵌入式开发建议
 
 1. **图片处理**: `image_url` 返回的是 Base64 编码的 **320x320 1-bit BMP (Bitmap)** 图片。这种格式非常适合资源受限的单片机（如 ESP32），因为它不需要复杂的解码器，可以直接读取像素点阵。
-2. **点阵提取**: 1-bit BMP 文件的头部之后即为像素数据，每位（bit）代表一个像素点（0为黑，1为白）。对于 320x320 的图像，数据量约为 12.8KB。
+2. **点阵提取**: `bitmap_hex` 字段提供了原始的 1-bit 像素数据（十六进制字符串），每位（bit）代表一个像素点（0为黑，1为白）。对于 320x320 的图像，数据量约为 12.8KB。这比解析 BMP 文件头更简单。
 3. **轮询频率**: 建议轮询间隔不低于 2 秒，以减轻服务器压力。
 4. **音频采集**: 确保 WAV 格式正确，否则 Gemini API 可能无法识别。
 

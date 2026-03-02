@@ -68,14 +68,94 @@ def encode_image_to_base64(img: Image.Image, format: str = "BMP") -> str:
     return f"data:image/{mime_type};base64,{img_str}"
 
 def process_line_art_image(image_url: str, size: int = 320, apply_filter: bool = True) -> str:
+    if not apply_filter:
+        return image_url
     try:
         img = load_image(image_url)
-        if apply_filter:
-            img = apply_line_art_filter(img, size)
+        img = apply_line_art_filter(img, size)
         return encode_image_to_base64(img)
     except Exception as e:
         print(f"Error processing image: {e}")
         return image_url
+
+def get_raw_bitmap_hex(image_url: str, size: int = 320) -> Optional[str]:
+    try:
+        img = load_image(image_url)
+        img = apply_line_art_filter(img, size)
+        # img is in '1' mode, tobytes() returns packed bits
+        return img.tobytes().hex()
+    except Exception as e:
+        print(f"Error extracting raw bitmap: {e}")
+        return None
+
+def get_embedded_bitmap(image_url: str, size: int = 320) -> Optional[Dict[str, Any]]:
+    """Extract a 1-bit bitmap suitable for embedded devices (packed bits)."""
+    try:
+        img = load_image(image_url)
+        img = apply_line_art_filter(img, size)
+        # img is in '1' mode, tobytes() returns packed bits (8 pixels per byte)
+        raw_bytes = img.tobytes()
+        return {
+            "data_hex": raw_bytes.hex(),
+            "data_b64": base64.b64encode(raw_bytes).decode("utf-8"),
+            "width": size,
+            "height": size,
+            "bits_per_pixel": 1,
+            "byte_size": len(raw_bytes)
+        }
+    except Exception as e:
+        print(f"Error extracting embedded bitmap: {e}")
+        return None
+
+def get_dhash(img: Image.Image) -> str:
+    """Compute a 64-bit difference hash (dHash) for the image."""
+    try:
+        # Resize to 9x8 and convert to grayscale
+        img_resized = img.resize((9, 8), Image.LANCZOS).convert('L')
+        pixels = np.array(img_resized)
+        # Compare adjacent pixels in each row
+        diff = pixels[:, 1:] > pixels[:, :-1]
+        # Convert the 64 boolean values to a hex string
+        decimal_value = 0
+        for index, value in enumerate(diff.flatten()):
+            if value:
+                decimal_value += 2**(63 - index)
+        return hex(decimal_value)[2:].zfill(16)
+    except Exception as e:
+        print(f"Error computing dHash: {e}")
+        return "0" * 16
+
+def get_image_metadata(image_url: str) -> Dict[str, Any]:
+    """Extract dimensions, color space, and perceptual hash from an image."""
+    try:
+        # Load without forced conversion to get original mode if possible
+        if image_url.startswith("data:image"):
+            header, encoded = image_url.split(",", 1)
+            data = base64.b64decode(encoded)
+            img = Image.open(io.BytesIO(data))
+        else:
+            response = requests.get(image_url, timeout=10)
+            response.raise_for_status()
+            img = Image.open(io.BytesIO(response.content))
+            
+        width, height = img.size
+        color_space = img.mode
+        phash = get_dhash(img)
+        
+        return {
+            "width": width,
+            "height": height,
+            "color_space": color_space,
+            "phash": phash
+        }
+    except Exception as e:
+        print(f"Error extracting metadata: {e}")
+        return {
+            "width": 0,
+            "height": 0,
+            "color_space": "unknown",
+            "phash": "0" * 16
+        }
 
 # --- External APIs ---
 
@@ -258,6 +338,7 @@ class GenerateRequest(BaseModel):
     num_images: int = 1
     style: str = "default"
     apply_line_art: bool = True
+    include_metadata: bool = False
 
 class FeedbackRequest(BaseModel):
     generation_id: str
@@ -347,7 +428,27 @@ async def generate_drawing(req: GenerateRequest):
         raise HTTPException(status_code=500, detail="Image generation failed with all available engines.")
         
     # 5. Process Image
-    processed_images = [process_line_art_image(url, apply_filter=req.apply_line_art) for url in image_urls]
+    processed_images = []
+    raw_bitmaps = []
+    embedded_bitmaps = []
+    image_metadata = []
+    
+    for url in image_urls:
+        if req.include_metadata:
+            image_metadata.append(get_image_metadata(url))
+        else:
+            image_metadata.append(None)
+            
+        if req.apply_line_art:
+            processed_images.append(process_line_art_image(url, apply_filter=True))
+            # Extract structured bitmap data for embedded devices
+            eb = get_embedded_bitmap(url)
+            embedded_bitmaps.append(eb)
+            raw_bitmaps.append(eb["data_hex"] if eb else None)
+        else:
+            processed_images.append(url)
+            raw_bitmaps.append(None)
+            embedded_bitmaps.append(None)
     
     generation_id = str(uuid.uuid4())
     
@@ -364,6 +465,9 @@ async def generate_drawing(req: GenerateRequest):
         "style": req.style,
         "apply_line_art": req.apply_line_art,
         "image_urls": processed_images,
+        "raw_bitmaps": raw_bitmaps if req.apply_line_art else None,
+        "bitmap_data": embedded_bitmaps if req.apply_line_art else None,
+        "metadata": image_metadata if req.include_metadata else None,
         "timestamp": time.time()
     }
     generation_history.append(history_entry)
@@ -372,6 +476,9 @@ async def generate_drawing(req: GenerateRequest):
         "generationId": generation_id,
         "imageUrl": processed_images[0] if processed_images else None,
         "imageUrls": processed_images,
+        "bitmaps": raw_bitmaps if req.apply_line_art else None,
+        "bitmapData": embedded_bitmaps if req.apply_line_art else None,
+        "metadata": image_metadata if req.include_metadata else None,
         "protagonist": protagonist,
         "title": title,
         "prompt": req.prompt
@@ -515,16 +622,18 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
                     if image_urls:
                         # Process the image for printing
                         processed_image = process_line_art_image(image_urls[0])
+                        bitmap_hex = get_raw_bitmap_hex(image_urls[0])
                         
                         job_id = str(uuid.uuid4())
                         print_jobs.append({
                             "job_id": job_id,
                             "image_url": processed_image,
+                            "bitmap_hex": bitmap_hex,
                             "prompt": prompt,
                             "timestamp": time.time()
                         })
                         
-                        action = {"type": "print", "prompt": prompt, "job_id": job_id, "image_url": processed_image}
+                        action = {"type": "print", "prompt": prompt, "job_id": job_id, "image_url": processed_image, "bitmap_hex": bitmap_hex}
                         
                         # Save to history
                         generation_id = str(uuid.uuid4())
@@ -540,6 +649,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
                             "style": "default",
                             "apply_line_art": True,
                             "image_urls": [processed_image],
+                            "raw_bitmaps": [bitmap_hex],
                             "timestamp": time.time()
                         }
                         generation_history.append(history_entry)
