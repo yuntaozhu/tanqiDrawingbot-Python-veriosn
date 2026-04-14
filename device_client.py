@@ -54,7 +54,7 @@ def record_audio(filename="voice_input.wav", duration=5, fs=16000):
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-BASE_URL = 'http://localhost:3000' 
+BASE_URL = 'https://tanqibot.up.railway.app' 
 DEVICE_TOKEN = 'test-token-123'
 POLL_INTERVAL = 2.0  # Seconds
 
