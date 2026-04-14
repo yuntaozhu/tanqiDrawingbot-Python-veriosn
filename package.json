@@ -5,8 +5,8 @@
   "scripts": {
     "prestart": "python3 -m py_compile app.py",
     "start": "python3 app.py",
-    "dev": "python3 -m py_compile app.py && python3 app.py",
-    "build": "python3 -m py_compile app.py",
+    "dev": "pip install -r requirements.txt && python3 -m py_compile app.py && python3 app.py",
+    "build": "pip install -r requirements.txt && python3 -m py_compile app.py",
     "lint": "python3 -m py_compile app.py"
   },
   "dependencies": {
