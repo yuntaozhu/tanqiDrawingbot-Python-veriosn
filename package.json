@@ -1,15 +1,5 @@
 {
   "name": "toddler-drawing-dreamer-api",
   "version": "1.0.0",
-  "description": "Python API version of Toddler Drawing Dreamer",
-  "scripts": {
-    "prestart": "python3 -m py_compile app.py",
-    "start": "python3 app.py",
-    "dev": "pip install -r requirements.txt && python3 -m py_compile app.py && python3 app.py",
-    "build": "pip install -r requirements.txt && python3 -m py_compile app.py",
-    "lint": "python3 -m py_compile app.py"
-  },
-  "dependencies": {
-    "replicate": "^1.4.0"
-  }
+  "description": "Python API version of Toddler Drawing Dreamer"
 }
