@@ -34,7 +34,7 @@
     "image_url": "data:image/x-ms-bmp;base64,...",
     "bitmap_hex": "00ff00ff..."
   },
-  "audio_base64": null
+  "audio_base64": "base64-encoded-audio-data"
 }
 ```
 

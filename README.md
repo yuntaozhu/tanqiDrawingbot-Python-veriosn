@@ -77,13 +77,23 @@ Returns an array of generation objects, sorted by timestamp descending.
 ### 4. Voice Command (Device API)
 `POST /api/device/v1/voice`
 
-Handles voice commands from the device.
+Handles voice commands from the device. Transcribes audio, processes with LLM, and returns text response + TTS audio.
 
 **Headers:**
 - `x-device-token`: Your device token
+- `Content-Type`: `audio/wav`
 
 **Request Body:**
 Raw audio data (WAV format)
+
+**Response:**
+```json
+{
+  "text_response": "好的，我这就画一张小兔子。",
+  "action": { ... },
+  "audio_base64": "base64-encoded-audio-data"
+}
+```
 
 ### 5. Check Print Jobs (Device API)
 `GET /api/device/v1/print-jobs`

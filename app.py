@@ -5,6 +5,8 @@ import json
 import io
 import uuid
 import sys
+import functools
+import random
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, Request, HTTPException, Header, Response
 from fastapi.responses import JSONResponse
@@ -41,6 +43,39 @@ generation_history = []
 
 # --- Helper Functions ---
 
+def retry_with_backoff(max_retries=3, initial_delay=1, backoff_factor=2, jitter=True):
+    """Decorator for retrying functions with exponential backoff."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            last_exception = None
+            for i in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    # Don't retry on certain errors (e.g., auth, validation)
+                    error_str = str(e).lower()
+                    if any(x in error_str for x in ["unauthorized", "invalid api key", "401", "403", "422"]):
+                        raise e
+                        
+                    if i == max_retries:
+                        break
+                    
+                    # Exponential backoff
+                    sleep_time = delay * (backoff_factor ** i)
+                    if jitter:
+                        sleep_time += random.uniform(0, 0.1 * sleep_time)
+                    
+                    print(f"Retrying {func.__name__} in {sleep_time:.2f}s (Attempt {i+1}/{max_retries}) due to: {e}")
+                    time.sleep(sleep_time)
+            
+            raise last_exception
+        return wrapper
+    return decorator
+
+@retry_with_backoff(max_retries=3)
 def load_image(image_url: str) -> Image.Image:
     if image_url.startswith("data:image"):
         header, encoded = image_url.split(",", 1)
@@ -125,6 +160,7 @@ def get_dhash(img: Image.Image) -> str:
         print(f"Error computing dHash: {e}")
         return "0" * 16
 
+@retry_with_backoff(max_retries=3)
 def get_image_metadata(image_url: str) -> Dict[str, Any]:
     """Extract dimensions, color space, and perceptual hash from an image."""
     try:
@@ -165,6 +201,7 @@ class ReplicateAPI:
         if self.api_key:
             os.environ["REPLICATE_API_TOKEN"] = self.api_key
 
+    @retry_with_backoff(max_retries=3)
     def generate_text(self, prompt: str, max_tokens: int = 100) -> str:
         # Try DeepSeek first if available, as it's more reliable in China
         deepseek_key = os.getenv("DEEPSEEK_API_KEY")
@@ -193,6 +230,7 @@ class ReplicateAPI:
         except Exception as e:
             raise RuntimeError(f"Replicate API Error (Text Gen): {e}")
 
+    @retry_with_backoff(max_retries=3)
     def generate_image(self, prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1, style: str = "default") -> Optional[List[str]]:
         if not self.api_key:
             raise ValueError("REPLICATE_API_TOKEN is not set.")
@@ -236,6 +274,7 @@ class IdeogramAPI:
         self.api_key = os.getenv("IDEOGRAM_API_KEY")
         self.base_url = "https://api.ideogram.ai/v1"
 
+    @retry_with_backoff(max_retries=3)
     def generate_image(self, prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1, style: str = "default") -> Optional[List[str]]:
         if not self.api_key:
             return None
@@ -512,6 +551,7 @@ class DeepSeekAPI:
         self.base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
 
+    @retry_with_backoff(max_retries=3)
     def generate_text(self, prompt: str, system_instruction: str = "You are a helpful assistant.", tools: List[Dict] = None) -> Dict[str, Any]:
         if not self.client:
             raise ValueError("DEEPSEEK_API_KEY is not set.")
@@ -540,6 +580,7 @@ class DeepSeekAPI:
         except Exception as e:
             raise RuntimeError(f"DeepSeek API Error: {e}")
 
+    @retry_with_backoff(max_retries=3)
     def transcribe_audio(self, audio_bytes: bytes) -> str:
         # Using OpenAI Whisper compatible API for STT
         # Many China-based relays provide this, or use a dedicated provider
@@ -561,6 +602,32 @@ class DeepSeekAPI:
             print(f"STT Error: {e}")
             return ""
 
+    @retry_with_backoff(max_retries=3)
+    def generate_speech(self, text: str) -> Optional[str]:
+        """Convert text to speech and return as base64 encoded string."""
+        if not text:
+            return None
+            
+        tts_api_key = os.getenv("TTS_API_KEY") or self.api_key
+        tts_base_url = os.getenv("TTS_BASE_URL") or self.base_url
+        
+        # If no TTS config, skip
+        if not tts_api_key:
+            return None
+            
+        try:
+            tts_client = OpenAI(api_key=tts_api_key, base_url=tts_base_url)
+            response = tts_client.audio.speech.create(
+                model="tts-1",
+                voice="alloy",
+                input=text
+            )
+            # Return as base64 string
+            return base64.b64encode(response.content).decode('utf-8')
+        except Exception as e:
+            print(f"TTS Error: {e}")
+            return None
+
 async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, Any]:
     deepseek = DeepSeekAPI()
     
@@ -569,10 +636,11 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
     if isinstance(prompt_input, bytes):
         user_text = deepseek.transcribe_audio(prompt_input)
         if not user_text:
+            error_msg = "我没听清，请再说一遍。"
             return {
-                "text_response": "我没听清，请再说一遍。",
+                "text_response": error_msg,
                 "action": None,
-                "audio_base64": None
+                "audio_base64": deepseek.generate_speech(error_msg)
             }
 
     system_instruction = "You are a gentle kindergarten teacher named 'Tanqi' (探奇). Speak in Chinese. If the child asks to draw something, call the generate_drawing function. Keep responses short and sweet."
@@ -665,10 +733,15 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
         if not text_response:
             text_response = "我没听清，请再说一遍。"
             
+        # Generate TTS if text_response is available
+        audio_base64 = None
+        if text_response:
+            audio_base64 = deepseek.generate_speech(text_response)
+            
         return {
             "text_response": text_response,
             "action": action,
-            "audio_base64": None
+            "audio_base64": audio_base64
         }
     except Exception as e:
         print(f"LLM Handler Error: {e}")
@@ -736,4 +809,5 @@ async def complete_print_job(job_id: str, request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=3000)
+    port = int(os.getenv("PORT", 3000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

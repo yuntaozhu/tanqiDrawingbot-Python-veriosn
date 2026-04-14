@@ -6,7 +6,6 @@ google-genai
 pillow
 numpy
 opencv-python-headless
-sounddevice
 scipy
 replicate
 openai
