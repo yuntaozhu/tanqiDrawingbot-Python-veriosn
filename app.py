@@ -792,6 +792,14 @@ async def get_print_jobs(request: Request):
         }
     return {"has_job": False}
 
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Toddler Drawing Dreamer API is running"}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
+
 @app.post("/api/device/v1/print-jobs/{job_id}/complete")
 async def complete_print_job(job_id: str, request: Request):
     token = request.headers.get("x-device-token")
