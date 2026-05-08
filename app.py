@@ -647,84 +647,147 @@ class DeepSeekAPI:
             print(f"DeepSeek chat error: {e}")
             raise RuntimeError(f"DeepSeek API Error: {e}")
 
-    @retry_with_backoff(max_retries=3)
+    @retry_with_backoff(max_retries=2)
     def transcribe_audio(self, audio_bytes: bytes) -> str:
-        """Transcribe audio using a Whisper-compatible API."""
-        stt_api_key = os.getenv("STT_API_KEY") or self.api_key
-        stt_base_url = os.getenv("STT_BASE_URL") or self.base_url
+        """Transcribe audio with fallback support for multiple providers."""
+        input_size_kb = len(audio_bytes) / 1024
+        print(f"[DEBUG] [STT] Starting transcription for {input_size_kb:.2f} KB audio")
+        providers = []
         
-        # DeepSeek official API does not support STT yet.
-        # If the user is using the default DeepSeek URL for STT, it will likely fail.
-        if "deepseek.com" in stt_base_url.lower() and not os.getenv("STT_BASE_URL"):
-            print("WARNING: DeepSeek official API does not support STT. Please set STT_BASE_URL to a Whisper-compatible provider (e.g., SiliconFlow, OpenAI, or Groq).")
-            # We don't raise here yet to allow relay users to still try, but we log the warning.
+        # 1. Primary STT from Env
+        stt_key = os.getenv("STT_API_KEY")
+        stt_url = os.getenv("STT_BASE_URL")
+        if stt_key:
+            providers.append({"name": "Primary (Env)", "key": stt_key, "url": stt_url})
+            
+        # 2. SiliconFlow Fallback
+        sf_key = os.getenv("SILICONFLOW_API_KEY")
+        if sf_key:
+            providers.append({"name": "SiliconFlow", "key": sf_key, "url": "https://api.siliconflow.cn/v1"})
+            
+        # 3. OpenAI Fallback
+        oa_key = os.getenv("OPENAI_API_KEY")
+        if oa_key:
+            providers.append({"name": "OpenAI", "key": oa_key, "url": "https://api.openai.com/v1"})
 
-        if not stt_api_key:
-            print("STT Error: No API key found for transcription.")
+        # 4. DeepSeek Key (only if URL is likely a relay)
+        ds_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        if self.api_key and "deepseek.com" not in ds_url.lower():
+             providers.append({"name": "DeepSeek Relay", "key": self.api_key, "url": ds_url})
+
+        if not providers:
+            print("[ERROR] [STT] No valid STT providers configured in environment variables.")
             return ""
 
-        try:
-            stt_client = OpenAI(api_key=stt_api_key, base_url=stt_base_url)
-            
-            # Create a file-like object from bytes
-            audio_file = io.BytesIO(audio_bytes)
-            audio_file.name = "audio.wav"
-            
-            print(f"Sending {len(audio_bytes)} bytes to STT at {stt_base_url}...")
-            transcript = stt_client.audio.transcriptions.create(
-                model="whisper-1", 
-                file=audio_file
-            )
-            print(f"STT Result: '{transcript.text}'")
-            return transcript.text
-        except Exception as e:
-            print(f"STT Critical Error in transcribe_audio: {e}")
-            if "404" in str(e) or "405" in str(e):
-                print("Hint: The STT endpoint was not found. Your STT_BASE_URL may be incorrect or the provider doesn't support Whisper.")
-            raise e
+        errors = []
+        for provider in providers:
+            try:
+                # Skip if key is missing (fallback safety)
+                if not provider["key"]: continue
+                
+                start_time = time.time()
+                print(f"[DEBUG] [STT] Attempting with {provider['name']} at {provider.get('url', 'default')}...")
+                client = OpenAI(api_key=provider["key"], base_url=provider.get("url"))
+                
+                audio_file = io.BytesIO(audio_bytes)
+                audio_file.name = "audio.wav"
+                
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1", 
+                    file=audio_file,
+                    timeout=25
+                )
+                
+                duration = time.time() - start_time
+                if transcript.text:
+                    print(f"[DEBUG] [STT] Success ({provider['name']}) in {duration:.2f}s: '{transcript.text}'")
+                    return transcript.text
+                else:
+                    print(f"[WARNING] [STT] Provider {provider['name']} returned empty text in {duration:.2f}s")
+            except Exception as e:
+                err_msg = f"STT Provider {provider['name']} failed: {str(e)}"
+                print(f"[ERROR] [STT] {err_msg}")
+                errors.append(err_msg)
+                continue
+        
+        print(f"[ERROR] [STT] All STT providers failed: {'; '.join(errors)}")
+        return ""
 
-    @retry_with_backoff(max_retries=3)
+    @retry_with_backoff(max_retries=2)
     def generate_speech(self, text: str) -> Optional[str]:
-        """Convert text to speech and return as base64 encoded string."""
+        """Convert text to speech with fallback support for multiple providers."""
         if not text:
             return None
-            
-        tts_api_key = os.getenv("TTS_API_KEY") or self.api_key
-        tts_base_url = os.getenv("TTS_BASE_URL") or self.base_url
         
-        # If no TTS config, skip
-        if not tts_api_key:
-            return None
+        print(f"[DEBUG] [TTS] Generating speech for: '{text[:50]}...'")
+        providers = []
+        
+        # 1. Primary TTS from Env
+        tts_key = os.getenv("TTS_API_KEY")
+        tts_url = os.getenv("TTS_BASE_URL")
+        if tts_key:
+             providers.append({"name": "Primary (Env)", "key": tts_key, "url": tts_url})
+             
+        # 2. SiliconFlow Fallback
+        sf_key = os.getenv("SILICONFLOW_API_KEY")
+        if sf_key:
+            providers.append({"name": "SiliconFlow", "key": sf_key, "url": "https://api.siliconflow.cn/v1"})
             
-        tts_client = OpenAI(api_key=tts_api_key, base_url=tts_base_url)
-        response = tts_client.audio.speech.create(
-            model="tts-1",
-            voice="alloy",
-            input=text
-        )
-        # Return as base64 string
-        return base64.b64encode(response.content).decode('utf-8')
+        # 3. OpenAI Fallback
+        oa_key = os.getenv("OPENAI_API_KEY")
+        if oa_key:
+            providers.append({"name": "OpenAI", "key": oa_key, "url": "https://api.openai.com/v1"})
+
+        if not providers:
+            print("[WARNING] [TTS] No valid TTS providers configured.")
+            return None
+
+        for provider in providers:
+            try:
+                # Skip if key is missing
+                if not provider["key"]: continue
+                
+                start_time = time.time()
+                print(f"[DEBUG] [TTS] Attempting with {provider['name']} at {provider.get('url', 'default')}...")
+                client = OpenAI(api_key=provider["key"], base_url=provider.get("url"))
+                response = client.audio.speech.create(
+                    model="tts-1",
+                    voice="alloy",
+                    input=text,
+                    timeout=20
+                )
+                duration = time.time() - start_time
+                base64_data = base64.b64encode(response.content).decode('utf-8')
+                print(f"[DEBUG] [TTS] Success ({provider['name']}) in {duration:.2f}s, size: {len(base64_data)} chars")
+                return base64_data
+            except Exception as e:
+                print(f"[ERROR] [TTS] Provider {provider['name']} failed: {e}")
+                continue
+        
+        print("[ERROR] [TTS] All TTS providers failed.")
+        return None
 
 async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, Any]:
+    start_time = time.time()
     deepseek = DeepSeekAPI()
     
     # Handle audio input if prompt_input is bytes
     user_text = prompt_input
     if isinstance(prompt_input, bytes):
-        print(f"Received voice input: {len(prompt_input)} bytes")
+        print(f"[DEBUG] [CORE] Received voice input: {len(prompt_input)} bytes")
         try:
             user_text = deepseek.transcribe_audio(prompt_input)
         except Exception as e:
-            print(f"Failed to transcribe audio after retries: {e}")
+            print(f"[ERROR] [CORE] Failed to transcribe audio after retries: {e}")
             user_text = ""
             
         if not user_text:
-            print("STT returned empty text. Returning fallback message.")
+            print("[DEBUG] [CORE] STT returned empty text. Returning fallback message.")
             error_msg = "我没听清，请再说一遍。"
             try:
                 audio_base64 = deepseek.generate_speech(error_msg)
             except Exception as e:
-                print(f"Failed to generate speech after retries: {e}")
+                print(f"[ERROR] [CORE] Failed to generate fallback speech: {e}")
                 audio_base64 = None
                 
             return {
@@ -732,9 +795,9 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
                 "action": None,
                 "audio_base64": audio_base64
             }
-        print(f"Transcribed Text: '{user_text}'")
+        print(f"[DEBUG] [CORE] Transcribed Text: '{user_text}'")
     else:
-        print(f"Received chat input: '{user_text}'")
+        print(f"[DEBUG] [CORE] Received chat input: '{user_text}'")
 
     system_instruction = "You are a gentle kindergarten teacher named 'Tanqi' (探奇). Speak in Chinese. If the child asks to draw something, call the generate_drawing function. Keep responses short and sweet."
     
@@ -759,9 +822,12 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
     ]
     
     try:
+        print(f"[DEBUG] [CORE] Sending text to LLM (DeepSeek)...")
         res = deepseek.generate_text(user_text, system_instruction=system_instruction, tools=tools)
         text_response = res.get("text") or ""
         tool_calls = res.get("tool_calls")
+        
+        print(f"[DEBUG] [CORE] LLM Response: '{text_response[:100]}...' | Tool calls: {len(tool_calls) if tool_calls else 0}")
         
         action = None
         
@@ -770,18 +836,22 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
             if call.function.name == "generate_drawing":
                 args = json.loads(call.function.arguments)
                 prompt = args.get("prompt")
+                print(f"[DEBUG] [CORE] LLM requested drawing: '{prompt}'")
                 
                 # Actually generate the drawing
                 try:
                     # Translate prompt to English for the image generator
                     replicate_api = ReplicateAPI()
+                    print(f"[DEBUG] [CORE] Translating logic to English...")
                     english_prompt = replicate_api.generate_text(f"Translate the following text into English. Output ONLY the English translation, no other text. Text: {prompt}")
+                    print(f"[DEBUG] [CORE] English Prompt: '{english_prompt}'")
                     
                     # Generate image using fallback mechanism
                     image_urls = generate_image_with_fallback(english_prompt)
                     
                     if image_urls:
                         # Process the image for printing
+                        print(f"[DEBUG] [CORE] Image generated, processing for line art...")
                         processed_image = process_line_art_image(image_urls[0])
                         bitmap_hex = get_raw_bitmap_hex(image_urls[0])
                         
@@ -795,6 +865,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
                         })
                         
                         action = {"type": "print", "prompt": prompt, "job_id": job_id, "image_url": processed_image, "bitmap_hex": bitmap_hex}
+                        print(f"[DEBUG] [CORE] Drawing job created: {job_id}")
                         
                         # Save to history
                         generation_id = str(uuid.uuid4())
@@ -818,9 +889,10 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
                         if not text_response:
                             text_response = f"好的，我这就画一张{prompt}。"
                     else:
+                        print("[ERROR] [CORE] Image generation returned no URLs.")
                         text_response = "抱歉，我画不出来这个。"
                 except Exception as e:
-                    print(f"Error generating drawing from voice: {e}")
+                    print(f"[ERROR] [CORE] Error generating drawing from voice: {e}")
                     text_response = "抱歉，画画的时候出错了。"
                     
         if not text_response:
@@ -832,8 +904,11 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
             try:
                 audio_base64 = deepseek.generate_speech(text_response)
             except Exception as e:
-                print(f"Failed to generate speech for final response after retries: {e}")
+                print(f"[ERROR] [CORE] Failed to generate final response speech: {e}")
                 audio_base64 = None
+        
+        total_duration = time.time() - start_time
+        print(f"[DEBUG] [CORE] total processing completed in {total_duration:.2f}s")
             
         return {
             "text_response": text_response,
@@ -841,7 +916,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
             "audio_base64": audio_base64
         }
     except Exception as e:
-        print(f"LLM Handler Error: {e}")
+        print(f"[ERROR] [CORE] LLM Handler Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 class ChatRequest(BaseModel):
