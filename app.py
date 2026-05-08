@@ -1016,7 +1016,7 @@ class DeepSeekAPI:
             providers[0]["model"] = primary_model
         elif stt_url and "siliconflow.cn" in stt_url.lower() and providers:
             # Default for SiliconFlow if not explicit
-            providers[0]["model"] = "SYSTRAN/faster-whisper-large-v3"
+            providers[0]["model"] = "FunAudioLLM/SenseVoiceSmall"
             providers[0]["name"] = "SiliconFlow (Env)"
         elif stt_key and providers:
             # Fallback to whisper-1 for generic OpenAI-compatible providers
