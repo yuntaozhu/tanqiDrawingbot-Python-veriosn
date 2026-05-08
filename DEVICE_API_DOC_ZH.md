@@ -4,7 +4,7 @@
 
 ## 1. 通用说明
 
-- **基础 URL**: `http://<server-ip>:3000`
+- **基础 URL**: `https://tanqibot.up.railway.app`
 - **认证方式**: 所有设备端接口均需在 Header 中携带 `x-device-token`。
 - **数据格式**: 
   - 请求：通常为 `application/json` 或 `audio/wav`。

@@ -7,6 +7,7 @@ import uuid
 import sys
 import functools
 import random
+import hashlib
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, Request, HTTPException, Header, Response
 from fastapi.responses import JSONResponse
@@ -44,7 +45,7 @@ generation_history = []
 # --- Helper Functions ---
 
 def retry_with_backoff(max_retries=3, initial_delay=1, backoff_factor=2, jitter=True):
-    """Decorator for retrying functions with exponential backoff."""
+    """Decorator for retrying functions with exponential backoff and robust error handling."""
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -55,12 +56,28 @@ def retry_with_backoff(max_retries=3, initial_delay=1, backoff_factor=2, jitter=
                     return func(*args, **kwargs)
                 except Exception as e:
                     last_exception = e
-                    # Don't retry on certain errors (e.g., auth, validation)
                     error_str = str(e).lower()
-                    if any(x in error_str for x in ["unauthorized", "invalid api key", "401", "403", "422"]):
+                    
+                    # Categorize the error for specific logging
+                    error_type = "Unknown Error"
+                    if any(x in error_str for x in ["429", "too many requests", "rate limit"]):
+                        error_type = "Rate Limit Error"
+                    elif any(x in error_str for x in ["unauthorized", "invalid api key", "401", "403", "authentication"]):
+                        error_type = "Authentication Error"
+                    elif any(x in error_str for x in ["500", "502", "503", "504", "server error", "bad gateway"]):
+                        error_type = "Server Error"
+                    elif any(x in error_str for x in ["timeout", "timed out"]):
+                        error_type = "Timeout Error"
+                        
+                    print(f"[{error_type}] in {func.__name__}: {e}")
+                    
+                    # Don't retry on certain fatal errors (e.g., auth, validation)
+                    if error_type == "Authentication Error" or any(x in error_str for x in ["422", "validation"]):
+                        print(f"Fatal error in {func.__name__}, aborting retries.")
                         raise e
                         
                     if i == max_retries:
+                        print(f"Max retries ({max_retries}) reached for {func.__name__}.")
                         break
                     
                     # Exponential backoff
@@ -68,7 +85,7 @@ def retry_with_backoff(max_retries=3, initial_delay=1, backoff_factor=2, jitter=
                     if jitter:
                         sleep_time += random.uniform(0, 0.1 * sleep_time)
                     
-                    print(f"Retrying {func.__name__} in {sleep_time:.2f}s (Attempt {i+1}/{max_retries}) due to: {e}")
+                    print(f"Retrying {func.__name__} in {sleep_time:.2f}s (Attempt {i+1}/{max_retries})...")
                     time.sleep(sleep_time)
             
             raise last_exception
@@ -329,11 +346,56 @@ class IdeogramAPI:
             result = response.json()
             if result.get("data") and len(result["data"]) > 0:
                 return [item["url"] for item in result["data"]]
+            return None
         else:
-            print(f"Ideogram API Error: {response.status_code} {response.text}")
-        return None
+            error_msg = f"Ideogram API Error: {response.status_code} {response.text}"
+            print(error_msg)
+            raise RuntimeError(error_msg)
+
+CACHE_FILE = "image_cache.json"
+
+def load_image_cache():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading image cache: {e}")
+    return {}
+
+def save_image_cache(cache_data):
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(cache_data, f)
+    except Exception as e:
+        print(f"Error saving image cache: {e}")
+
+IMAGE_CACHE = load_image_cache()
+
+def get_image_cache_key(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style, preferred_engine):
+    key_parts = [
+        str(prompt),
+        str(seed),
+        str(protagonist),
+        str(aspect_ratio),
+        str(num_images),
+        str(style),
+        str(preferred_engine)
+    ]
+    if ref_image:
+        key_parts.append(hashlib.md5(ref_image.encode('utf-8')).hexdigest())
+    
+    key_str = "|".join(key_parts)
+    return hashlib.md5(key_str.encode('utf-8')).hexdigest()
 
 def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1, style: str = "default", preferred_engine: Optional[str] = None) -> Optional[List[str]]:
+    global IMAGE_CACHE
+    cache_key = get_image_cache_key(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style, preferred_engine)
+    
+    if cache_key in IMAGE_CACHE:
+        print(f"Cache hit for prompt: '{prompt}'. Returning cached image(s).")
+        return IMAGE_CACHE[cache_key]
+
     replicate_api = ReplicateAPI()
     ideogram_api = IdeogramAPI()
     
@@ -357,6 +419,8 @@ def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protag
             image_urls = generate_func()
             if image_urls:
                 print(f"Successfully generated image using: {name}")
+                IMAGE_CACHE[cache_key] = image_urls
+                save_image_cache(IMAGE_CACHE)
                 return image_urls
             else:
                 print(f"Engine {name} returned no images.")
@@ -582,25 +646,39 @@ class DeepSeekAPI:
 
     @retry_with_backoff(max_retries=3)
     def transcribe_audio(self, audio_bytes: bytes) -> str:
-        # Using OpenAI Whisper compatible API for STT
-        # Many China-based relays provide this, or use a dedicated provider
+        """Transcribe audio using a Whisper-compatible API."""
         stt_api_key = os.getenv("STT_API_KEY") or self.api_key
         stt_base_url = os.getenv("STT_BASE_URL") or self.base_url
-        stt_client = OpenAI(api_key=stt_api_key, base_url=stt_base_url)
         
+        # DeepSeek official API does not support STT yet.
+        # If the user is using the default DeepSeek URL for STT, it will likely fail.
+        if "deepseek.com" in stt_base_url.lower() and not os.getenv("STT_BASE_URL"):
+            print("WARNING: DeepSeek official API does not support STT. Please set STT_BASE_URL to a Whisper-compatible provider (e.g., SiliconFlow, OpenAI, or Groq).")
+            # We don't raise here yet to allow relay users to still try, but we log the warning.
+
+        if not stt_api_key:
+            print("STT Error: No API key found for transcription.")
+            return ""
+
         try:
+            stt_client = OpenAI(api_key=stt_api_key, base_url=stt_base_url)
+            
             # Create a file-like object from bytes
             audio_file = io.BytesIO(audio_bytes)
             audio_file.name = "audio.wav"
             
+            print(f"Sending {len(audio_bytes)} bytes to STT at {stt_base_url}...")
             transcript = stt_client.audio.transcriptions.create(
                 model="whisper-1", 
                 file=audio_file
             )
+            print(f"STT Result: '{transcript.text}'")
             return transcript.text
         except Exception as e:
-            print(f"STT Error: {e}")
-            return ""
+            print(f"STT Critical Error in transcribe_audio: {e}")
+            if "404" in str(e) or "405" in str(e):
+                print("Hint: The STT endpoint was not found. Your STT_BASE_URL may be incorrect or the provider doesn't support Whisper.")
+            raise e
 
     @retry_with_backoff(max_retries=3)
     def generate_speech(self, text: str) -> Optional[str]:
@@ -615,18 +693,14 @@ class DeepSeekAPI:
         if not tts_api_key:
             return None
             
-        try:
-            tts_client = OpenAI(api_key=tts_api_key, base_url=tts_base_url)
-            response = tts_client.audio.speech.create(
-                model="tts-1",
-                voice="alloy",
-                input=text
-            )
-            # Return as base64 string
-            return base64.b64encode(response.content).decode('utf-8')
-        except Exception as e:
-            print(f"TTS Error: {e}")
-            return None
+        tts_client = OpenAI(api_key=tts_api_key, base_url=tts_base_url)
+        response = tts_client.audio.speech.create(
+            model="tts-1",
+            voice="alloy",
+            input=text
+        )
+        # Return as base64 string
+        return base64.b64encode(response.content).decode('utf-8')
 
 async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, Any]:
     deepseek = DeepSeekAPI()
@@ -634,13 +708,24 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
     # Handle audio input if prompt_input is bytes
     user_text = prompt_input
     if isinstance(prompt_input, bytes):
-        user_text = deepseek.transcribe_audio(prompt_input)
+        try:
+            user_text = deepseek.transcribe_audio(prompt_input)
+        except Exception as e:
+            print(f"Failed to transcribe audio after retries: {e}")
+            user_text = ""
+            
         if not user_text:
             error_msg = "我没听清，请再说一遍。"
+            try:
+                audio_base64 = deepseek.generate_speech(error_msg)
+            except Exception as e:
+                print(f"Failed to generate speech after retries: {e}")
+                audio_base64 = None
+                
             return {
                 "text_response": error_msg,
                 "action": None,
-                "audio_base64": deepseek.generate_speech(error_msg)
+                "audio_base64": audio_base64
             }
 
     system_instruction = "You are a gentle kindergarten teacher named 'Tanqi' (探奇). Speak in Chinese. If the child asks to draw something, call the generate_drawing function. Keep responses short and sweet."
@@ -736,7 +821,11 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
         # Generate TTS if text_response is available
         audio_base64 = None
         if text_response:
-            audio_base64 = deepseek.generate_speech(text_response)
+            try:
+                audio_base64 = deepseek.generate_speech(text_response)
+            except Exception as e:
+                print(f"Failed to generate speech for final response after retries: {e}")
+                audio_base64 = None
             
         return {
             "text_response": text_response,
