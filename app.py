@@ -437,6 +437,8 @@ def preprocess_audio(audio_bytes: bytes) -> bytes:
         # 2. Peak Normalization
         if max_amp > 0.0001: 
             audio_float = audio_float / max_amp * 0.90
+        else:
+            print(f"[WARNING] [AUDIO_PROC] max_amp too low: {max_amp:.8f}")
             
         # Convert back to int16 PCM
         data_int16 = (audio_float * 32767).astype(np.int16)
@@ -1131,16 +1133,23 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
     # Handle audio input if prompt_input is bytes
     user_text = prompt_input
     if isinstance(prompt_input, bytes):
-        print(f"[DEBUG] [CORE] Received voice input: {len(prompt_input)} bytes")
+        input_len = len(prompt_input)
+        print(f"[DEBUG] [CORE] Received voice input: {input_len} bytes")
+        
         try:
+            start_stt = time.time()
             user_text = deepseek.transcribe_audio(prompt_input)
+            stt_duration = time.time() - start_stt
+            print(f"[DEBUG] [CORE] STT took {stt_duration:.2f}s. Result: '{user_text}'")
         except Exception as e:
             print(f"[ERROR] [CORE] Failed to transcribe audio after retries: {e}")
+            import traceback
+            traceback.print_exc()
             user_text = ""
             
         if not user_text:
             print("[DEBUG] [CORE] STT returned empty text. Returning fallback message.")
-            error_msg = "我没听清，请再说一遍。"
+            error_msg = "对不起，我没听清，能不能请你再说一遍？" 
             try:
                 audio_base64 = deepseek.generate_speech(error_msg)
             except Exception as e:
@@ -1150,7 +1159,9 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
             return {
                 "text_response": error_msg,
                 "action": None,
-                "audio_base64": audio_base64
+                "audio_base64": audio_base64,
+                "stt_empty": True,
+                "raw_len": input_len
             }
         print(f"[DEBUG] [CORE] Transcribed Text: '{user_text}'")
     else:

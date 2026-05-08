@@ -126,9 +126,11 @@ def send_voice_command():
     log(f"Headers: {headers}", "DEBUG")
     log(f"Payload Size: {len(audio_data)} bytes", "DEBUG")
     
+    start_time = time.time()
     try:
         res = requests.post(url, data=audio_data, headers=headers)
-        log(f"Response Status: {res.status_code}", "DEBUG")
+        elapsed = time.time() - start_time
+        log(f"Response Status: {res.status_code} (took {elapsed:.2f}s)", "DEBUG")
         
         if res.status_code == 200:
             data = res.json()
@@ -137,7 +139,9 @@ def send_voice_command():
             log(f"Action: {data.get('action')}")
             audio_b64 = data.get('audio_base64')
             if audio_b64:
-                log(f"Received Audio: {len(audio_b64)} bytes", "DEBUG")
+                log(f"Received Audio: {len(audio_b64)} characters (base64)", "DEBUG")
+                # Try to save the response audio for verification
+                save_audio(audio_b64, "voice_response.mp3")
             res.close()
             return data
         else:
@@ -153,26 +157,32 @@ def check_print_jobs():
     Polls for new print jobs.
     """
     url = f"{BASE_URL}/api/device/v1/print-jobs"
+    headers = get_headers()
+    
+    # Only log polling occasionally or with DEBUG to avoid spamming the console
+    # log(f"GET {url}", "DEBUG")
     
     try:
-        res = requests.get(url, headers=get_headers())
+        res = requests.get(url, headers=headers)
         if res.status_code == 200:
             job = res.json()
             res.close()
             if job.get('has_job'):
-                log(f">>> NEW PRINT JOB: {job.get('job_id')}")
+                log(f">>> NEW PRINT JOB RECEIVED: {job.get('job_id')}")
+                log(f"    Prompt: {job.get('prompt')}", "DEBUG")
+                log(f"    Image URL: {job.get('image_url')[:50]}...", "DEBUG")
                 return job
             return None
         elif res.status_code >= 500:
-            log(f"Server Error {res.status_code}. Retrying later...")
+            log(f"Server Error {res.status_code}. Retrying later...", "ERROR")
             res.close()
             return None
         else:
-            log(f"Poll Error {res.status_code}: {res.text[:100]}")
+            log(f"Poll Error {res.status_code}: {res.text[:100]}", "ERROR")
             res.close()
             return None
     except Exception as e:
-        log(f"Exception in poll: {e}")
+        log(f"Exception in poll: {e}", "ERROR")
         return None
 
 def complete_print_job(job_id):
@@ -202,14 +212,23 @@ def send_chat_command(text):
     log(f"POST {url}", "DEBUG")
     log(f"Headers: {headers}", "DEBUG")
     
+    start_time = time.time()
     try:
         res = requests.post(url, json={"text": text}, headers=headers)
-        log(f"Response Status: {res.status_code}", "DEBUG")
+        elapsed = time.time() - start_time
+        log(f"Response Status: {res.status_code} (took {elapsed:.2f}s)", "DEBUG")
         
         if res.status_code == 200:
             data = res.json()
             log("--- Chat Response ---")
             log(f"Text Response: {data.get('text_response')}")
+            
+            # Check for audio in chat response too
+            audio_b64 = data.get('audio_base64')
+            if audio_b64:
+                log(f"Received Audio: {len(audio_b64)} characters (base64)", "DEBUG")
+                save_audio(audio_b64, "chat_response.mp3")
+                
             action = data.get('action')
             if action:
                 log(f"Action: {action.get('type')} - {action.get('prompt')}")
