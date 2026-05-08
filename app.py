@@ -20,6 +20,7 @@ from openai import OpenAI
 from PIL import Image
 import numpy as np
 import cv2
+from scipy.io import wavfile
 
 load_dotenv()
 
@@ -212,6 +213,54 @@ def get_image_metadata(image_url: str) -> Dict[str, Any]:
 
 # --- External APIs ---
 
+def preprocess_audio(audio_bytes: bytes) -> bytes:
+    """Preprocess audio to reduce noise and normalize volume."""
+    try:
+        # Load WAV bytes
+        import io
+        fs, data = wavfile.read(io.BytesIO(audio_bytes))
+        
+        # Convert to float32 normalized [-1, 1]
+        if data.dtype == np.int16:
+            audio_float = data.astype(np.float32) / 32768.0
+        elif data.dtype == np.int32:
+            audio_float = data.astype(np.float32) / 2147483648.0
+        elif data.dtype == np.uint8:
+            audio_float = (data.astype(np.float32) - 128.0) / 128.0
+        else:
+            audio_float = data.astype(np.float32)
+            
+        # Ensure mono
+        if len(audio_float.shape) > 1:
+            audio_float = np.mean(audio_float, axis=1)
+            
+        # 1. Simple Noise Reduction (Moving Average as Low Pass)
+        # Helps with high-frequency hiss/noise
+        window_size = 3
+        if len(audio_float) > window_size:
+            audio_float = np.convolve(audio_float, np.ones(window_size)/window_size, mode='same')
+            
+        # 2. Peak Normalization
+        # Makes quiet recordings easier for STT to hear
+        max_val = np.max(np.abs(audio_float))
+        if max_val > 0.001: 
+            audio_float = audio_float / max_val * 0.95
+            
+        # Convert back to int16 PCM (Standard for most STT)
+        data_int16 = (audio_float * 32767).astype(np.int16)
+        
+        # Write back to bytes
+        output = io.BytesIO()
+        wavfile.write(output, fs, data_int16)
+        processed_bytes = output.getvalue()
+        
+        print(f"[DEBUG] [AUDIO_PROC] Preprocessed audio: {len(audio_bytes)} -> {len(processed_bytes)} bytes")
+        return processed_bytes
+        
+    except Exception as e:
+        print(f"[WARNING] [AUDIO_PROC] Preprocessing failed: {e}. Using original audio.")
+        return audio_bytes
+
 class ReplicateAPI:
     def __init__(self):
         self.api_key = os.getenv("REPLICATE_API_TOKEN")
@@ -353,24 +402,46 @@ class IdeogramAPI:
             raise RuntimeError(error_msg)
 
 CACHE_FILE = "image_cache.json"
+STT_CACHE_FILE = "stt_cache.json"
+TTS_CACHE_FILE = "tts_cache.json"
+MAX_CACHE_AGE_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
-def load_image_cache():
-    if os.path.exists(CACHE_FILE):
+def load_cache(filename):
+    if os.path.exists(filename):
         try:
-            with open(CACHE_FILE, "r") as f:
+            with open(filename, "r") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"Error loading image cache: {e}")
+            print(f"Error loading cache {filename}: {e}")
     return {}
 
-def save_image_cache(cache_data):
+def save_cache(filename, cache_data):
     try:
-        with open(CACHE_FILE, "w") as f:
+        # Maintenance: Remove old entries before saving
+        now = time.time()
+        to_delete = []
+        for key, entry in cache_data.items():
+            if isinstance(entry, dict) and "timestamp" in entry:
+                if now - entry["timestamp"] > MAX_CACHE_AGE_SECONDS:
+                    to_delete.append(key)
+        
+        for key in to_delete:
+            del cache_data[key]
+            
+        with open(filename, "w") as f:
             json.dump(cache_data, f)
     except Exception as e:
-        print(f"Error saving image cache: {e}")
+        print(f"Error saving cache {filename}: {e}")
+
+def load_image_cache():
+    return load_cache(CACHE_FILE)
+
+def save_image_cache(cache_data):
+    save_cache(CACHE_FILE, cache_data)
 
 IMAGE_CACHE = load_image_cache()
+STT_CACHE = load_cache(STT_CACHE_FILE)
+TTS_CACHE = load_cache(TTS_CACHE_FILE)
 
 def get_image_cache_key(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style, preferred_engine):
     key_parts = [
@@ -388,25 +459,32 @@ def get_image_cache_key(prompt, seed, protagonist, ref_image, aspect_ratio, num_
     key_str = "|".join(key_parts)
     return hashlib.md5(key_str.encode('utf-8')).hexdigest()
 
-def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1, style: str = "default", preferred_engine: Optional[str] = None) -> Optional[List[str]]:
+def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1, style: str = "default", preferred_engine: Optional[str] = None) -> Dict[str, Any]:
     global IMAGE_CACHE
     cache_key = get_image_cache_key(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style, preferred_engine)
     
     if cache_key in IMAGE_CACHE:
-        print(f"Cache hit for prompt: '{prompt}'. Returning cached image(s).")
-        return IMAGE_CACHE[cache_key]
+        entry = IMAGE_CACHE[cache_key]
+        if isinstance(entry, list):
+            # Old format, migrate it
+            print(f"Cache hit (Legacy) for prompt: '{prompt}'.")
+            return {"urls": entry, "metadata": [None] * len(entry)}
+        
+        print(f"Cache hit for prompt: '{prompt}'.")
+        return {
+            "urls": entry.get("urls", []),
+            "metadata": entry.get("metadata", [None] * len(entry.get("urls", [])))
+        }
 
     replicate_api = ReplicateAPI()
     ideogram_api = IdeogramAPI()
     
     # Define available engines and their generation methods
-    # Prioritize replicate as requested
     engines = [
         ("replicate", lambda: replicate_api.generate_image(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style)),
         ("ideogram", lambda: ideogram_api.generate_image(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style))
     ]
     
-    # If a preferred engine is specified, try to move it to the front
     if preferred_engine:
         preferred = next((e for e in engines if e[0] == preferred_engine), None)
         if preferred:
@@ -419,15 +497,30 @@ def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protag
             image_urls = generate_func()
             if image_urls:
                 print(f"Successfully generated image using: {name}")
-                IMAGE_CACHE[cache_key] = image_urls
+                
+                # Fetch metadata for the new images
+                metadata = []
+                for url in image_urls:
+                    try:
+                        metadata.append(get_image_metadata(url))
+                    except Exception as me:
+                        print(f"Failed to fetch metadata for {url}: {me}")
+                        metadata.append(None)
+                
+                IMAGE_CACHE[cache_key] = {
+                    "urls": image_urls,
+                    "metadata": metadata,
+                    "timestamp": time.time(),
+                    "engine": name
+                }
                 save_image_cache(IMAGE_CACHE)
-                return image_urls
+                return {"urls": image_urls, "metadata": metadata}
             else:
                 print(f"Engine {name} returned no images.")
         except Exception as e:
             print(f"Engine {name} failed with error: {e}")
             
-    return None
+    return {"urls": None, "metadata": None}
 
 # --- API Models ---
 
@@ -516,7 +609,7 @@ async def generate_drawing(req: GenerateRequest):
             print(f"Protagonist translation failed: {e}")
 
     # 4. Generate Image
-    image_urls = generate_image_with_fallback(
+    result = generate_image_with_fallback(
         english_prompt, 
         req.seed, 
         english_protagonist, 
@@ -526,6 +619,8 @@ async def generate_drawing(req: GenerateRequest):
         req.style, 
         preferred_engine=req.engine
     )
+    image_urls = result["urls"]
+    cached_metadata = result["metadata"]
 
     if not image_urls:
         raise HTTPException(status_code=500, detail="Image generation failed with all available engines.")
@@ -536,9 +631,13 @@ async def generate_drawing(req: GenerateRequest):
     embedded_bitmaps = []
     image_metadata = []
     
-    for url in image_urls:
+    for i, url in enumerate(image_urls):
         if req.include_metadata:
-            image_metadata.append(get_image_metadata(url))
+            # Use cached metadata if available, otherwise fetch it
+            if cached_metadata and i < len(cached_metadata) and cached_metadata[i]:
+                image_metadata.append(cached_metadata[i])
+            else:
+                image_metadata.append(get_image_metadata(url))
         else:
             image_metadata.append(None)
             
@@ -650,6 +749,17 @@ class DeepSeekAPI:
     @retry_with_backoff(max_retries=2)
     def transcribe_audio(self, audio_bytes: bytes) -> str:
         """Transcribe audio with fallback support for multiple providers."""
+        global STT_CACHE
+        
+        # 1. Preprocess the audio for better recognition
+        audio_bytes = preprocess_audio(audio_bytes)
+        
+        audio_hash = hashlib.md5(audio_bytes).hexdigest()
+        
+        if audio_hash in STT_CACHE:
+            print(f"[DEBUG] [STT] Cache hit for audio hash: {audio_hash}")
+            return STT_CACHE[audio_hash].get("text", "")
+
         input_size_kb = len(audio_bytes) / 1024
         print(f"[DEBUG] [STT] Starting transcription for {input_size_kb:.2f} KB audio")
         providers = []
@@ -701,6 +811,15 @@ class DeepSeekAPI:
                 duration = time.time() - start_time
                 if transcript.text:
                     print(f"[DEBUG] [STT] Success ({provider['name']}) in {duration:.2f}s: '{transcript.text}'")
+                    
+                    # Update cache
+                    STT_CACHE[audio_hash] = {
+                        "text": transcript.text,
+                        "timestamp": time.time(),
+                        "provider": provider["name"]
+                    }
+                    save_cache(STT_CACHE_FILE, STT_CACHE)
+                    
                     return transcript.text
                 else:
                     print(f"[WARNING] [STT] Provider {provider['name']} returned empty text in {duration:.2f}s")
@@ -719,6 +838,13 @@ class DeepSeekAPI:
         if not text:
             return None
         
+        global TTS_CACHE
+        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+        
+        if text_hash in TTS_CACHE:
+            print(f"[DEBUG] [TTS] Cache hit for text hash: {text_hash}")
+            return TTS_CACHE[text_hash].get("audio_base64")
+
         print(f"[DEBUG] [TTS] Generating speech for: '{text[:50]}...'")
         providers = []
         
@@ -759,6 +885,15 @@ class DeepSeekAPI:
                 duration = time.time() - start_time
                 base64_data = base64.b64encode(response.content).decode('utf-8')
                 print(f"[DEBUG] [TTS] Success ({provider['name']}) in {duration:.2f}s, size: {len(base64_data)} chars")
+                
+                # Update cache
+                TTS_CACHE[text_hash] = {
+                    "audio_base64": base64_data,
+                    "timestamp": time.time(),
+                    "provider": provider["name"]
+                }
+                save_cache(TTS_CACHE_FILE, TTS_CACHE)
+                
                 return base64_data
             except Exception as e:
                 print(f"[ERROR] [TTS] Provider {provider['name']} failed: {e}")
@@ -847,7 +982,8 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
                     print(f"[DEBUG] [CORE] English Prompt: '{english_prompt}'")
                     
                     # Generate image using fallback mechanism
-                    image_urls = generate_image_with_fallback(english_prompt)
+                    result = generate_image_with_fallback(english_prompt)
+                    image_urls = result["urls"]
                     
                     if image_urls:
                         # Process the image for printing
@@ -991,6 +1127,28 @@ async def complete_print_job(job_id: str, request: Request):
         "job_id": job_id,
         "status": "finished"
     }
+
+@app.post("/api/admin/clear-cache")
+async def clear_cache(request: Request):
+    """Admin endpoint to clear the image cache."""
+    # Simple check for a secret if provided, otherwise allow
+    admin_key = os.getenv("ADMIN_KEY")
+    if admin_key:
+        auth_header = request.headers.get("Authorization")
+        if auth_header != f"Bearer {admin_key}":
+            raise HTTPException(status_code=403, detail="Forbidden")
+            
+    global IMAGE_CACHE, STT_CACHE, TTS_CACHE
+    IMAGE_CACHE = {}
+    STT_CACHE = {}
+    TTS_CACHE = {}
+    
+    for f_path in [CACHE_FILE, STT_CACHE_FILE, TTS_CACHE_FILE]:
+        if os.path.exists(f_path):
+            os.remove(f_path)
+            
+    print("All caches cleared manually.")
+    return {"status": "success", "message": "All caches cleared"}
 
 
 
