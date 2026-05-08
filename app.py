@@ -625,6 +625,7 @@ class DeepSeekAPI:
             {"role": "user", "content": prompt}
         ]
         
+        print(f"DeepSeek: System='{system_instruction[:50]}...', User='{prompt}'")
         try:
             kwargs = {
                 "model": "deepseek-chat",
@@ -636,12 +637,14 @@ class DeepSeekAPI:
 
             response = self.client.chat.completions.create(**kwargs)
             message = response.choices[0].message
+            print(f"DeepSeek response: '{message.content[:100]}...' {'(has tool calls)' if message.tool_calls else ''}")
             
             return {
                 "text": message.content,
                 "tool_calls": message.tool_calls
             }
         except Exception as e:
+            print(f"DeepSeek chat error: {e}")
             raise RuntimeError(f"DeepSeek API Error: {e}")
 
     @retry_with_backoff(max_retries=3)
@@ -708,6 +711,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
     # Handle audio input if prompt_input is bytes
     user_text = prompt_input
     if isinstance(prompt_input, bytes):
+        print(f"Received voice input: {len(prompt_input)} bytes")
         try:
             user_text = deepseek.transcribe_audio(prompt_input)
         except Exception as e:
@@ -715,6 +719,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
             user_text = ""
             
         if not user_text:
+            print("STT returned empty text. Returning fallback message.")
             error_msg = "我没听清，请再说一遍。"
             try:
                 audio_base64 = deepseek.generate_speech(error_msg)
@@ -727,6 +732,9 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
                 "action": None,
                 "audio_base64": audio_base64
             }
+        print(f"Transcribed Text: '{user_text}'")
+    else:
+        print(f"Received chat input: '{user_text}'")
 
     system_instruction = "You are a gentle kindergarten teacher named 'Tanqi' (探奇). Speak in Chinese. If the child asks to draw something, call the generate_drawing function. Keep responses short and sweet."
     
@@ -853,16 +861,21 @@ async def handle_chat(req: ChatRequest, request: Request):
 
 @app.post("/api/device/v1/voice")
 async def handle_voice(request: Request):
+    print("Incoming voice request...")
     token = request.headers.get("x-device-token")
     if not token:
+        print("Unauthorized: missing x-device-token")
         raise HTTPException(status_code=401, detail="Unauthorized")
         
     body = await request.body()
     if not body:
+        print("Bad Request: empty body")
         raise HTTPException(status_code=400, detail="Empty audio body received")
-        
+    
+    print(f"Voice body size: {len(body)} bytes")
     api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("API_KEY")
     if not api_key:
+        print("Internal Server Error: API key missing")
         raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY or API_KEY is missing")
         
     return await process_llm_interaction(body, api_key)
