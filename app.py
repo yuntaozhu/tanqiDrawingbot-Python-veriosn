@@ -387,10 +387,11 @@ def get_image_metadata(image_url: str) -> Dict[str, Any]:
 # --- External APIs ---
 
 def preprocess_audio(audio_bytes: bytes) -> bytes:
-    """Preprocess audio to reduce noise and normalize volume."""
+    """Preprocess audio to reduce noise and normalize volume using advanced techniques."""
     try:
         import io
         import numpy as np
+        from scipy.signal import butter, lfilter
         
         # Log raw input info
         print(f"[DEBUG] [AUDIO_PROC] Processing raw bytes: {len(audio_bytes)} bytes")
@@ -399,7 +400,6 @@ def preprocess_audio(audio_bytes: bytes) -> bytes:
             fs, data = wavfile.read(io.BytesIO(audio_bytes))
         except Exception as read_err:
             print(f"[ERROR] [AUDIO_PROC] Failed to read WAV format: {read_err}")
-            # Try to see if it's a raw stream or header-less (though client sends WAV)
             return audio_bytes
 
         duration = len(data) / fs
@@ -420,25 +420,37 @@ def preprocess_audio(audio_bytes: bytes) -> bytes:
             audio_float = np.mean(audio_float, axis=1)
             
         # Log signal stats
-        rms = np.sqrt(np.mean(audio_float**2))
         max_amp = np.max(np.abs(audio_float))
-        print(f"[DEBUG] [AUDIO_PROC] Signal Stats: Max Amp={max_amp:.4f}, RMS={rms:.4f}")
+        print(f"[DEBUG] [AUDIO_PROC] Signal Stats: Max Amp={max_amp:.6f}")
         
-        # If extremely silent, we don't need to process further or send to STT
         if max_amp < 0.00001:
-            print("[WARNING] [AUDIO_PROC] Silence detected.")
+            print("[WARNING] [AUDIO_PROC] Silence detected (max_amp < 1e-5).")
             return b"" 
 
-        # 1. Simple Noise Reduction (Moving Average)
-        window_size = 3
-        if len(audio_float) > window_size:
-            audio_float = np.convolve(audio_float, np.ones(window_size)/window_size, mode='same')
-            
-        # 2. Peak Normalization
-        if max_amp > 0.0001: 
-            audio_float = audio_float / max_amp * 0.90
+        # 1. Bandpass Filter (Speech range approx 80Hz - 8kHz)
+        def bandpass_filter(data, lowcut, highcut, fs, order=2):
+            nyq = 0.5 * fs
+            low = lowcut / nyq
+            high = highcut / nyq
+            # Clip if fs is too low
+            high = min(high, 0.99)
+            b, a = butter(order, [low, high], btype='band')
+            return lfilter(b, a, data)
+
+        try:
+            # Gentler filter
+            audio_float = bandpass_filter(audio_float, 80, min(7000, fs/2 - 100), fs)
+        except Exception as filter_err:
+            print(f"[WARNING] [AUDIO_PROC] Bandpass filter failed: {filter_err}")
+
+        # Removed Spectral Gating as it might be too aggressive for low-quality recordings
+
+        # 3. Peak Normalization (Target -1dB)
+        final_max = np.max(np.abs(audio_float))
+        if final_max > 0.0001: 
+            audio_float = audio_float / final_max * 0.90 
         else:
-            print(f"[WARNING] [AUDIO_PROC] max_amp too low: {max_amp:.8f}")
+            print(f"[WARNING] [AUDIO_PROC] final_max too low after filtering: {final_max:.8f}")
             
         # Convert back to int16 PCM
         data_int16 = (audio_float * 32767).astype(np.int16)
@@ -999,9 +1011,16 @@ class DeepSeekAPI:
              })
 
         # Override model for primary if provided
-        primary_model = os.getenv("STT_MODEL", "whisper-1")
-        if stt_key and providers:
+        primary_model = os.getenv("STT_MODEL")
+        if primary_model and providers:
             providers[0]["model"] = primary_model
+        elif stt_url and "siliconflow.cn" in stt_url.lower() and providers:
+            # Default for SiliconFlow if not explicit
+            providers[0]["model"] = "SYSTRAN/faster-whisper-large-v3"
+            providers[0]["name"] = "SiliconFlow (Env)"
+        elif stt_key and providers:
+            # Fallback to whisper-1 for generic OpenAI-compatible providers
+            providers[0]["model"] = "whisper-1"
 
         if not providers:
             print("[ERROR] [STT] No valid STT providers configured in environment variables.")
@@ -1026,14 +1045,16 @@ class DeepSeekAPI:
                 audio_file = io.BytesIO(processed_audio)
                 audio_file.name = "audio.wav"
                 
+                # Use Chinese language hint for better recognition
                 transcript = client.audio.transcriptions.create(
                     model=model_name, 
                     file=audio_file,
+                    language="zh",
                     timeout=25
                 )
                 
                 duration = time.time() - start_time
-                if transcript.text:
+                if transcript and hasattr(transcript, 'text') and transcript.text:
                     print(f"[DEBUG] [STT] Success ({provider['name']}) in {duration:.2f}s: '{transcript.text}'")
                     
                     # Update cache
@@ -1043,10 +1064,10 @@ class DeepSeekAPI:
                         "provider": provider["name"]
                     }
                     save_cache(STT_CACHE_FILE, STT_CACHE)
-                    
                     return transcript.text
                 else:
-                    print(f"[WARNING] [STT] Provider {provider['name']} returned empty text in {duration:.2f}s")
+                    print(f"[WARNING] [STT] {provider['name']} returned empty text in {duration:.2f}s. Full response: {transcript}")
+                    errors.append(f"{provider['name']} returned empty text")
             except Exception as e:
                 err_msg = f"STT Provider {provider['name']} failed: {str(e)}"
                 print(f"[ERROR] [STT] {err_msg}")
@@ -1295,50 +1316,66 @@ class ChatRequest(BaseModel):
 @app.post("/api/device/v1/chat")
 async def handle_chat(req: ChatRequest, request: Request):
     token = request.headers.get("x-device-token")
+    ua = request.headers.get("user-agent")
+    print(f"[DEBUG] [CONN] Incoming chat request from UA: {ua}, Token: {token[:5] if token else 'None'}***")
     if not token:
+        print("[WARNING] [CONN] Unauthorized chat attempt: missing x-device-token")
         raise HTTPException(status_code=401, detail="Unauthorized")
         
+    print(f"[DEBUG] [CHAT] Text length: {len(req.text)} chars")
     api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("API_KEY")
     if not api_key:
+        print("[ERROR] [CHAT] Internal Server Error: API key missing")
         raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY or API_KEY is missing")
         
-    return await process_llm_interaction(req.text, api_key)
+    res = await process_llm_interaction(req.text, api_key)
+    print(f"[DEBUG] [CHAT] Response generated: {res.get('text_response')[:50]}...")
+    return res
 
 @app.post("/api/device/v1/voice")
 async def handle_voice(request: Request):
     token = request.headers.get("x-device-token")
     ua = request.headers.get("user-agent")
-    print(f"[DEBUG] [CONN] Incoming voice request from UA: {ua}, Token: {token[:5]}***")
+    print(f"[DEBUG] [CONN] Incoming voice request from UA: {ua}, Token: {token[:5] if token else 'None'}***")
     if not token:
-        print("Unauthorized: missing x-device-token")
+        print("[WARNING] [CONN] Unauthorized voice attempt: missing x-device-token")
         raise HTTPException(status_code=401, detail="Unauthorized")
         
     body = await request.body()
     if not body:
-        print("Bad Request: empty body")
+        print("[WARNING] [VOICE] Bad Request: empty body")
         raise HTTPException(status_code=400, detail="Empty audio body received")
     
-    print(f"Voice body size: {len(body)} bytes")
+    print(f"[DEBUG] [VOICE] Audio binary size: {len(body)} bytes")
     api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("API_KEY")
     if not api_key:
-        print("Internal Server Error: API key missing")
+        print("[ERROR] [VOICE] Internal Server Error: API key missing")
         raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY or API_KEY is missing")
         
-    return await process_llm_interaction(body, api_key)
+    res = await process_llm_interaction(body, api_key)
+    print(f"[DEBUG] [VOICE] Response generated: {res.get('text_response')[:50]}...")
+    return res
 
 @app.get("/api/device/v1/print-jobs")
 async def get_print_jobs(request: Request):
     token = request.headers.get("x-device-token")
+    ua = request.headers.get("user-agent")
+    # Only logging token occasionally or explicitly if needed to avoid polling spam
+    # print(f"[DEBUG] [CONN] Polling print jobs from UA: {ua}, Token: {token[:5] if token else 'None'}***")
+    
     if not token:
+        print(f"[WARNING] [CONN] Unauthorized polling attempt from UA: {ua}")
         raise HTTPException(status_code=401, detail="Unauthorized")
         
     jobs = get_print_jobs_from_db()
     if jobs:
         job = jobs[0]
+        print(f"[DEBUG] [PRINT] Job found: {job.get('job_id')} for prompt: '{job.get('prompt')}'")
         return {
             "has_job": True,
             **job
         }
+    # return {"has_job": False}  # Keeping silent for empty polls to reduce log noise
     return {"has_job": False}
 
 @app.get("/")
@@ -1352,16 +1389,25 @@ async def health_check():
 @app.post("/api/device/v1/print-jobs/{job_id}/complete")
 async def complete_print_job(job_id: str, request: Request):
     token = request.headers.get("x-device-token")
+    ua = request.headers.get("user-agent")
+    print(f"[DEBUG] [CONN] Complete job request: {job_id} from UA: {ua}, Token: {token[:5] if token else 'None'}***")
+    
     if not token:
+        print(f"[WARNING] [CONN] Unauthorized complete job attempt for {job_id}")
         raise HTTPException(status_code=401, detail="Unauthorized")
         
-    delete_print_job_from_db(job_id)
-    return {
-        "success": True,
-        "message": "Print job completed successfully",
-        "job_id": job_id,
-        "status": "finished"
-    }
+    try:
+        delete_print_job_from_db(job_id)
+        print(f"[DEBUG] [PRINT] Job {job_id} marked as complete and deleted.")
+        return {
+            "success": True,
+            "message": "Print job completed successfully",
+            "job_id": job_id,
+            "status": "finished"
+        }
+    except Exception as e:
+        print(f"[ERROR] [PRINT] Failed to complete job {job_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete job from database")
 
 @app.post("/api/admin/clear-cache")
 async def clear_cache(request: Request):

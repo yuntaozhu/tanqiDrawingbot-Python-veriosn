@@ -54,7 +54,8 @@ def record_audio(filename="voice_input.wav", duration=5, fs=16000):
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-BASE_URL = 'https://tanqibot.up.railway.app' 
+# IMPORTANT: Update this BASE_URL to your current AI Studio preview/deployment URL
+BASE_URL = 'https://ais-dev-33rszcyydjjejpxqqhh4ub-21133040686.us-west2.run.app' 
 DEVICE_TOKEN = 'test-token-123'
 POLL_INTERVAL = 2.0  # Seconds
 
