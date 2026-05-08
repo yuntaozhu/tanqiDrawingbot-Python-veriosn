@@ -65,10 +65,10 @@ class GenerationHistoryDB(Base):
     num_images = Column(Integer, default=1)
     style = Column(String, default="default")
     apply_line_art = Column(Integer, default=1)
-    image_urls = Column(JSON, nullable=True)
-    raw_bitmaps = Column(JSON, nullable=True)
-    bitmap_data = Column(JSON, nullable=True)
-    metadata_json = Column(JSON, nullable=True)
+    image_urls = Column(Text, nullable=True) # Stored as JSON string
+    raw_bitmaps = Column(Text, nullable=True) # Stored as JSON string
+    bitmap_data = Column(Text, nullable=True) # Stored as JSON string
+    metadata_json = Column(Text, nullable=True) # Stored as JSON string
     timestamp = Column(Float)
 
 class FeedbackDB(Base):
@@ -105,10 +105,10 @@ def save_history_to_db(entry):
             num_images=entry.get("num_images", 1),
             style=entry.get("style", "default"),
             apply_line_art=1 if entry.get("apply_line_art", True) else 0,
-            image_urls=entry.get("image_urls"),
-            raw_bitmaps=entry.get("raw_bitmaps"),
-            bitmap_data=entry.get("bitmap_data"),
-            metadata_json=entry.get("metadata"),
+            image_urls=json.dumps(entry.get("image_urls")),
+            raw_bitmaps=json.dumps(entry.get("raw_bitmaps")),
+            bitmap_data=json.dumps(entry.get("bitmap_data")),
+            metadata_json=json.dumps(entry.get("metadata")),
             timestamp=entry["timestamp"]
         )
         db.add(db_entry)
@@ -135,10 +135,10 @@ def get_history_from_db(limit=50):
                 "num_images": e.num_images,
                 "style": e.style,
                 "apply_line_art": bool(e.apply_line_art),
-                "image_urls": e.image_urls,
-                "raw_bitmaps": e.raw_bitmaps,
-                "bitmap_data": e.bitmap_data,
-                "metadata": e.metadata_json,
+                "image_urls": json.loads(e.image_urls) if e.image_urls else [],
+                "raw_bitmaps": json.loads(e.raw_bitmaps) if e.raw_bitmaps else [],
+                "bitmap_data": json.loads(e.bitmap_data) if e.bitmap_data else None,
+                "metadata": json.loads(e.metadata_json) if e.metadata_json else None,
                 "timestamp": e.timestamp
             }
             for e in entries
