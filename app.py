@@ -424,8 +424,10 @@ def preprocess_audio(audio_bytes: bytes) -> bytes:
         max_amp = np.max(np.abs(audio_float))
         print(f"[DEBUG] [AUDIO_PROC] Signal Stats: Max Amp={max_amp:.4f}, RMS={rms:.4f}")
         
-        if max_amp < 0.001:
-            print("[WARNING] [AUDIO_PROC] Very quiet or silent recording detected.")
+        # If extremely silent, we don't need to process further or send to STT
+        if max_amp < 0.00001:
+            print("[WARNING] [AUDIO_PROC] Silence detected.")
+            return b"" 
 
         # 1. Simple Noise Reduction (Moving Average)
         window_size = 3
@@ -938,17 +940,24 @@ class DeepSeekAPI:
         """Transcribe audio with fallback support for multiple providers."""
         global STT_CACHE
         
+        if not audio_bytes or len(audio_bytes) < 100:
+            print("[DEBUG] [STT] Audio too short or empty, skipping.")
+            return ""
+
         # 1. Preprocess the audio for better recognition
-        audio_bytes = preprocess_audio(audio_bytes)
-        
-        audio_hash = hashlib.md5(audio_bytes).hexdigest()
+        processed_audio = preprocess_audio(audio_bytes)
+        if not processed_audio:
+            print("[DEBUG] [STT] Preprocessing returned empty (likely silent), skipping.")
+            return ""
+            
+        audio_hash = hashlib.md5(processed_audio).hexdigest()
         
         if audio_hash in STT_CACHE:
             print(f"[DEBUG] [STT] Cache hit for audio hash: {audio_hash}")
             return STT_CACHE[audio_hash].get("text", "")
 
-        input_size_kb = len(audio_bytes) / 1024
-        print(f"[DEBUG] [STT] Starting transcription for {input_size_kb:.2f} KB audio")
+        input_size_kb = len(processed_audio) / 1024
+        print(f"[DEBUG] [STT] Starting transcription for {input_size_kb:.2f} KB audio (Hash: {audio_hash})")
         providers = []
         
         # 1. Primary STT from Env
@@ -1012,7 +1021,7 @@ class DeepSeekAPI:
                 print(f"[DEBUG] [STT] Attempting with {provider['name']} using model {model_name}...")
                 client = OpenAI(api_key=provider["key"], base_url=provider.get("url"))
                 
-                audio_file = io.BytesIO(audio_bytes)
+                audio_file = io.BytesIO(processed_audio)
                 audio_file.name = "audio.wav"
                 
                 transcript = client.audio.transcriptions.create(
@@ -1286,8 +1295,9 @@ async def handle_chat(req: ChatRequest, request: Request):
 
 @app.post("/api/device/v1/voice")
 async def handle_voice(request: Request):
-    print("Incoming voice request...")
     token = request.headers.get("x-device-token")
+    ua = request.headers.get("user-agent")
+    print(f"[DEBUG] [CONN] Incoming voice request from UA: {ua}, Token: {token[:5]}***")
     if not token:
         print("Unauthorized: missing x-device-token")
         raise HTTPException(status_code=401, detail="Unauthorized")

@@ -305,9 +305,30 @@ def send_voice_file(filepath):
 # Main Test Loop
 # -----------------------------------------------------------------------------
 
+def safe_input(prompt=""):
+    """Safely handle input with potential encoding issues."""
+    try:
+        # Standard input
+        return input(prompt).strip()
+    except UnicodeDecodeError:
+        try:
+            # Fallback for some Windows/Linux envs
+            import sys
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+            line = sys.stdin.readline()
+            return line.strip()
+        except:
+            return ""
+    except EOFError:
+        return "exit"
+    except Exception as e:
+        print(f"\n[DEBUG] Input Error: {e}")
+        return ""
+
 def main():
     log("=======================================")
-    log("   SuperEgo Device Client Test")
+    log("   SuperEgo Device Client v1.1 (Safe Input)")
     log(f"   Target: {BASE_URL}")
     log("=======================================")
     
@@ -319,12 +340,12 @@ def main():
     if HAS_AUDIO_INPUT:
         print("5. Record from Microphone (5s)")
     
-    mode = input("Enter mode (1/2/3/4/5): ").strip()
+    mode = safe_input("Enter mode (1/2/3/4/5): ")
     
     if mode == "1":
         log("Entering Interactive Chat Mode. Type 'exit' to quit.")
         while True:
-            text = input("\nYou: ").strip()
+            text = safe_input("\nYou: ")
             if text.lower() == 'exit':
                 break
             if text:
@@ -357,9 +378,9 @@ def main():
                 
         except KeyboardInterrupt:
             log("Test stopped by user.")
-
+ 
     elif mode == "3":
-        filepath = input("Enter path to WAV file: ").strip()
+        filepath = safe_input("Enter path to WAV file: ")
         if filepath:
             send_voice_file(filepath)
             
@@ -385,7 +406,7 @@ def main():
             if filename:
                 send_voice_file(filename)
             
-            cont = input("Record again? (y/n): ").strip().lower()
+            cont = safe_input("Record again? (y/n): ").lower()
             if cont != 'y':
                 break
 
