@@ -96,10 +96,10 @@ def create_dummy_wav(duration_sec=1):
     
     return header + data
 
-def log(msg):
+def log(msg, level="INFO"):
     t = time.localtime()
     ts = "{:02d}:{:02d}:{:02d}".format(t[3], t[4], t[5])
-    print(f"[{ts}] {msg}")
+    print(f"[{ts}] [{level}] {msg}")
 
 # -----------------------------------------------------------------------------
 # API Interactions
@@ -118,30 +118,34 @@ def send_voice_command():
     """
     url = f"{BASE_URL}/api/device/v1/voice"
     
-    log(f"Recording audio (simulated)...")
+    log("Recording audio (simulated)...", "DEBUG")
     audio_data = create_dummy_wav(1.0)
     
-    log(f"POST {url} ({len(audio_data)} bytes)...")
+    headers = get_headers('audio/wav')
+    log(f"POST {url}", "DEBUG")
+    log(f"Headers: {headers}", "DEBUG")
+    log(f"Payload Size: {len(audio_data)} bytes", "DEBUG")
     
     try:
-        res = requests.post(url, data=audio_data, headers=get_headers('audio/wav'))
+        res = requests.post(url, data=audio_data, headers=headers)
+        log(f"Response Status: {res.status_code}", "DEBUG")
         
         if res.status_code == 200:
             data = res.json()
             log("--- Voice Response ---")
-            log(f"Text: {data.get('text_response')}")
+            log(f"Text Response: {data.get('text_response')}")
             log(f"Action: {data.get('action')}")
             audio_b64 = data.get('audio_base64')
             if audio_b64:
-                log(f"Received Audio: {len(audio_b64)} bytes")
+                log(f"Received Audio: {len(audio_b64)} bytes", "DEBUG")
             res.close()
             return data
         else:
-            log(f"Error {res.status_code} in Voice: {res.text[:100]}")
+            log(f"Error {res.status_code} in Voice: {res.text}", "ERROR")
             res.close()
             return None
     except Exception as e:
-        log(f"Exception in voice request: {e}")
+        log(f"Exception in voice request: {e}", "ERROR")
         return None
 
 def check_print_jobs():
@@ -193,15 +197,19 @@ def send_chat_command(text):
     """
     url = f"{BASE_URL}/api/device/v1/chat"
     
-    log(f"Sending text: {text}")
+    log(f"Sending text: {text}", "DEBUG")
+    headers = get_headers()
+    log(f"POST {url}", "DEBUG")
+    log(f"Headers: {headers}", "DEBUG")
     
     try:
-        res = requests.post(url, json={"text": text}, headers=get_headers())
+        res = requests.post(url, json={"text": text}, headers=headers)
+        log(f"Response Status: {res.status_code}", "DEBUG")
         
         if res.status_code == 200:
             data = res.json()
             log("--- Chat Response ---")
-            log(f"Text: {data.get('text_response')}")
+            log(f"Text Response: {data.get('text_response')}")
             action = data.get('action')
             if action:
                 log(f"Action: {action.get('type')} - {action.get('prompt')}")
@@ -211,11 +219,11 @@ def send_chat_command(text):
             res.close()
             return data
         else:
-            log(f"Error {res.status_code} in Chat: {res.text[:100]}")
+            log(f"Error {res.status_code} in Chat: {res.text}", "ERROR")
             res.close()
             return None
     except Exception as e:
-        log(f"Exception in chat request: {e}")
+        log(f"Exception in chat request: {e}", "ERROR")
         return None
 
 def save_image(data_uri, job_id):
@@ -229,6 +237,18 @@ def save_image(data_uri, job_id):
     except Exception as e:
         log(f"Failed to save image: {e}")
 
+def save_audio(b64_data, original_filename):
+    try:
+        data = binascii.a2b_base64(b64_data)
+        filename = "response_" + original_filename
+        if not filename.endswith(".mp3") and not filename.endswith(".wav"):
+             filename += ".mp3" # SiliconFlow/OpenAI usually returns MP3 by default for speech
+        with open(filename, "wb") as f:
+            f.write(data)
+        log(f"Saved response audio to {filename}")
+    except Exception as e:
+        log(f"Failed to save audio: {e}", "ERROR")
+
 def send_voice_file(filepath):
     """
     Sends a WAV file to the voice endpoint.
@@ -239,28 +259,46 @@ def send_voice_file(filepath):
         with open(filepath, "rb") as f:
             audio_data = f.read()
             
-        log(f"Sending voice file: {filepath} ({len(audio_data)} bytes)...")
+        log(f"File: {filepath} ({len(audio_data)} bytes)", "DEBUG")
+        if len(audio_data) < 44:
+             log("Warning: File too small to be a valid WAV", "WARNING")
+        else:
+             log(f"Header: {audio_data[:4]}...{audio_data[8:12]}", "DEBUG")
         
-        res = requests.post(url, data=audio_data, headers=get_headers('audio/wav'))
+        headers = get_headers('audio/wav')
+        log(f"POST {url}", "DEBUG")
+        log(f"Headers: {headers}", "DEBUG")
+        
+        res = requests.post(url, data=audio_data, headers=headers)
+        log(f"Response Status: {res.status_code}", "DEBUG")
         
         if res.status_code == 200:
             data = res.json()
             log("--- Voice Response ---")
-            log(f"Text: {data.get('text_response')}")
+            log(f"Text Response: {data.get('text_response')}")
             action = data.get('action')
             if action:
-                log(f"Action: {action.get('type')} - {action.get('prompt')}")
+                log(f"Action Type: {action.get('type')}")
+                log(f"Action Prompt: {action.get('prompt')}")
                 image_url = action.get('image_url')
                 if image_url and image_url.startswith('data:image'):
                     save_image(image_url, action.get('job_id'))
+            
+            audio_b64 = data.get('audio_base64')
+            if audio_b64:
+                log(f"Received Audio: {len(audio_b64)} bytes", "DEBUG")
+                import os
+                base_name = os.path.basename(filepath)
+                save_audio(audio_b64, base_name)
+                
             res.close()
             return data
         else:
-            log(f"Error {res.status_code} in Voice: {res.text[:100]}")
+            log(f"Error {res.status_code} in Voice: {res.text}", "ERROR")
             res.close()
             return None
     except Exception as e:
-        log(f"Exception sending voice file: {e}")
+        log(f"Exception sending voice file: {e}", "ERROR")
         return None
 
 # -----------------------------------------------------------------------------
