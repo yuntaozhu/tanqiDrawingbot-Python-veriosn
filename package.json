@@ -7,5 +7,8 @@
     "start": "python3 app.py",
     "build": "python3 -m py_compile app.py",
     "lint": "python3 -m py_compile app.py"
+  },
+  "dependencies": {
+    "sqlalchemy": "^10.1.1"
   }
 }

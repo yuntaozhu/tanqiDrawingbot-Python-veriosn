@@ -21,6 +21,9 @@ from PIL import Image
 import numpy as np
 import cv2
 from scipy.io import wavfile
+from sqlalchemy import create_engine, Column, Integer, String, Float, Text, JSON
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
 load_dotenv()
 
@@ -35,13 +38,183 @@ app.add_middleware(
 )
 
 # In-memory store for print jobs
-print_jobs = []
+# print_jobs = [] # Replaced by database
 
 # In-memory store for feedback (in a real app, use a database)
-feedback_store = []
+# feedback_store = [] # Replaced by database
 
 # In-memory store for generation history
-generation_history = []
+# generation_history = []  # Replaced by database
+
+# --- Database Setup ---
+DATABASE_URL = "sqlite:///./app_history.db"
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+class GenerationHistoryDB(Base):
+    __tablename__ = "generation_history"
+    id = Column(Integer, primary_key=True, index=True)
+    generation_id = Column(String, unique=True, index=True)
+    prompt = Column(Text)
+    english_prompt = Column(Text, nullable=True)
+    engine = Column(String, nullable=True)
+    protagonist = Column(String, nullable=True)
+    title = Column(String, nullable=True)
+    aspect_ratio = Column(String, nullable=True)
+    num_images = Column(Integer, default=1)
+    style = Column(String, default="default")
+    apply_line_art = Column(Integer, default=1)
+    image_urls = Column(JSON, nullable=True)
+    raw_bitmaps = Column(JSON, nullable=True)
+    bitmap_data = Column(JSON, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    timestamp = Column(Float)
+
+class FeedbackDB(Base):
+    __tablename__ = "feedback"
+    id = Column(Integer, primary_key=True, index=True)
+    generation_id = Column(String, index=True)
+    rating = Column(Integer)
+    liked = Column(Integer, nullable=True)
+    comments = Column(Text, nullable=True)
+    timestamp = Column(Float)
+
+class PrintJobDB(Base):
+    __tablename__ = "print_jobs"
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(String, unique=True, index=True)
+    image_url = Column(Text)
+    bitmap_hex = Column(Text, nullable=True)
+    prompt = Column(Text)
+    timestamp = Column(Float)
+
+Base.metadata.create_all(bind=engine)
+
+def save_history_to_db(entry):
+    db = SessionLocal()
+    try:
+        db_entry = GenerationHistoryDB(
+            generation_id=entry["generation_id"],
+            prompt=entry["prompt"],
+            english_prompt=entry.get("english_prompt"),
+            engine=entry.get("engine"),
+            protagonist=entry.get("protagonist"),
+            title=entry.get("title"),
+            aspect_ratio=entry.get("aspect_ratio"),
+            num_images=entry.get("num_images", 1),
+            style=entry.get("style", "default"),
+            apply_line_art=1 if entry.get("apply_line_art", True) else 0,
+            image_urls=entry.get("image_urls"),
+            raw_bitmaps=entry.get("raw_bitmaps"),
+            bitmap_data=entry.get("bitmap_data"),
+            metadata_json=entry.get("metadata"),
+            timestamp=entry["timestamp"]
+        )
+        db.add(db_entry)
+        db.commit()
+    except Exception as e:
+        print(f"Error saving history to DB: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+def get_history_from_db(limit=50):
+    db = SessionLocal()
+    try:
+        entries = db.query(GenerationHistoryDB).order_by(GenerationHistoryDB.timestamp.desc()).limit(limit).all()
+        return [
+            {
+                "generation_id": e.generation_id,
+                "prompt": e.prompt,
+                "english_prompt": e.english_prompt,
+                "engine": e.engine,
+                "protagonist": e.protagonist,
+                "title": e.title,
+                "aspect_ratio": e.aspect_ratio,
+                "num_images": e.num_images,
+                "style": e.style,
+                "apply_line_art": bool(e.apply_line_art),
+                "image_urls": e.image_urls,
+                "raw_bitmaps": e.raw_bitmaps,
+                "bitmap_data": e.bitmap_data,
+                "metadata": e.metadata_json,
+                "timestamp": e.timestamp
+            }
+            for e in entries
+        ]
+    except Exception as e:
+        print(f"Error getting history from DB: {e}")
+        return []
+    finally:
+        db.close()
+
+def save_feedback_to_db(entry):
+    db = SessionLocal()
+    try:
+        db_entry = FeedbackDB(
+            generation_id=entry["generation_id"],
+            rating=entry["rating"],
+            liked=1 if entry.get("liked") else 0 if entry.get("liked") is False else None,
+            comments=entry.get("comments"),
+            timestamp=entry["timestamp"]
+        )
+        db.add(db_entry)
+        db.commit()
+    except Exception as e:
+        print(f"Error saving feedback to DB: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+def save_print_job_to_db(job):
+    db = SessionLocal()
+    try:
+        db_job = PrintJobDB(
+            job_id=job["job_id"],
+            image_url=job["image_url"],
+            bitmap_hex=job.get("bitmap_hex"),
+            prompt=job["prompt"],
+            timestamp=job["timestamp"]
+        )
+        db.add(db_job)
+        db.commit()
+    except Exception as e:
+        print(f"Error saving print job to DB: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+def get_print_jobs_from_db():
+    db = SessionLocal()
+    try:
+        jobs = db.query(PrintJobDB).order_by(PrintJobDB.timestamp.asc()).all()
+        return [
+            {
+                "job_id": j.job_id,
+                "image_url": j.image_url,
+                "bitmap_hex": j.bitmap_hex,
+                "prompt": j.prompt,
+                "timestamp": j.timestamp
+            }
+            for j in jobs
+        ]
+    except Exception as e:
+        print(f"Error getting print jobs from DB: {e}")
+        return []
+    finally:
+        db.close()
+
+def delete_print_job_from_db(job_id):
+    db = SessionLocal()
+    try:
+        db.query(PrintJobDB).filter(PrintJobDB.job_id == job_id).delete()
+        db.commit()
+    except Exception as e:
+        print(f"Error deleting print job from DB: {e}")
+        db.rollback()
+    finally:
+        db.close()
 
 # --- Helper Functions ---
 
@@ -216,9 +389,21 @@ def get_image_metadata(image_url: str) -> Dict[str, Any]:
 def preprocess_audio(audio_bytes: bytes) -> bytes:
     """Preprocess audio to reduce noise and normalize volume."""
     try:
-        # Load WAV bytes
         import io
-        fs, data = wavfile.read(io.BytesIO(audio_bytes))
+        import numpy as np
+        
+        # Log raw input info
+        print(f"[DEBUG] [AUDIO_PROC] Processing raw bytes: {len(audio_bytes)} bytes")
+        
+        try:
+            fs, data = wavfile.read(io.BytesIO(audio_bytes))
+        except Exception as read_err:
+            print(f"[ERROR] [AUDIO_PROC] Failed to read WAV format: {read_err}")
+            # Try to see if it's a raw stream or header-less (though client sends WAV)
+            return audio_bytes
+
+        duration = len(data) / fs
+        print(f"[DEBUG] [AUDIO_PROC] Format: {data.dtype}, Channels: {1 if len(data.shape) == 1 else data.shape[1]}, FS: {fs}, Duration: {duration:.2f}s")
         
         # Convert to float32 normalized [-1, 1]
         if data.dtype == np.int16:
@@ -234,19 +419,24 @@ def preprocess_audio(audio_bytes: bytes) -> bytes:
         if len(audio_float.shape) > 1:
             audio_float = np.mean(audio_float, axis=1)
             
-        # 1. Simple Noise Reduction (Moving Average as Low Pass)
-        # Helps with high-frequency hiss/noise
+        # Log signal stats
+        rms = np.sqrt(np.mean(audio_float**2))
+        max_amp = np.max(np.abs(audio_float))
+        print(f"[DEBUG] [AUDIO_PROC] Signal Stats: Max Amp={max_amp:.4f}, RMS={rms:.4f}")
+        
+        if max_amp < 0.001:
+            print("[WARNING] [AUDIO_PROC] Very quiet or silent recording detected.")
+
+        # 1. Simple Noise Reduction (Moving Average)
         window_size = 3
         if len(audio_float) > window_size:
             audio_float = np.convolve(audio_float, np.ones(window_size)/window_size, mode='same')
             
         # 2. Peak Normalization
-        # Makes quiet recordings easier for STT to hear
-        max_val = np.max(np.abs(audio_float))
-        if max_val > 0.001: 
-            audio_float = audio_float / max_val * 0.95
+        if max_amp > 0.0001: 
+            audio_float = audio_float / max_amp * 0.90
             
-        # Convert back to int16 PCM (Standard for most STT)
+        # Convert back to int16 PCM
         data_int16 = (audio_float * 32767).astype(np.int16)
         
         # Write back to bytes
@@ -254,11 +444,13 @@ def preprocess_audio(audio_bytes: bytes) -> bytes:
         wavfile.write(output, fs, data_int16)
         processed_bytes = output.getvalue()
         
-        print(f"[DEBUG] [AUDIO_PROC] Preprocessed audio: {len(audio_bytes)} -> {len(processed_bytes)} bytes")
+        print(f"[DEBUG] [AUDIO_PROC] Preprocessing complete: {len(audio_bytes)} -> {len(processed_bytes)} bytes")
         return processed_bytes
         
     except Exception as e:
-        print(f"[WARNING] [AUDIO_PROC] Preprocessing failed: {e}. Using original audio.")
+        print(f"[ERROR] [AUDIO_PROC] Preprocessing critical failure: {e}")
+        import traceback
+        traceback.print_exc()
         return audio_bytes
 
 class ReplicateAPI:
@@ -672,7 +864,7 @@ async def generate_drawing(req: GenerateRequest):
         "metadata": image_metadata if req.include_metadata else None,
         "timestamp": time.time()
     }
-    generation_history.append(history_entry)
+    save_history_to_db(history_entry)
     
     return {
         "generationId": generation_id,
@@ -695,18 +887,13 @@ async def submit_feedback(req: FeedbackRequest):
         "comments": req.comments,
         "timestamp": time.time()
     }
-    feedback_store.append(feedback_entry)
-    
-    # In a real application, you would save this to a database
-    # and use it to fine-tune models or adjust prompts.
-    
+    save_feedback_to_db(feedback_entry)
     return {"success": True, "message": "Feedback received"}
 
 @app.get("/api/history")
 async def get_history(limit: int = 50):
-    # Return history sorted by timestamp descending
-    sorted_history = sorted(generation_history, key=lambda x: x["timestamp"], reverse=True)
-    return sorted_history[:limit]
+    # Return history sorted by timestamp descending from database
+    return get_history_from_db(limit)
 
 class DeepSeekAPI:
     def __init__(self):
@@ -773,17 +960,37 @@ class DeepSeekAPI:
         # 2. SiliconFlow Fallback
         sf_key = os.getenv("SILICONFLOW_API_KEY")
         if sf_key:
-            providers.append({"name": "SiliconFlow", "key": sf_key, "url": "https://api.siliconflow.cn/v1"})
+            providers.append({
+                "name": "SiliconFlow", 
+                "key": sf_key, 
+                "url": "https://api.siliconflow.cn/v1",
+                "model": os.getenv("SILICONFLOW_STT_MODEL", "SYSTRAN/faster-whisper-large-v3")
+            })
             
         # 3. OpenAI Fallback
         oa_key = os.getenv("OPENAI_API_KEY")
         if oa_key:
-            providers.append({"name": "OpenAI", "key": oa_key, "url": "https://api.openai.com/v1"})
+            providers.append({
+                "name": "OpenAI", 
+                "key": oa_key, 
+                "url": "https://api.openai.com/v1",
+                "model": "whisper-1"
+            })
 
-        # 4. DeepSeek Key (only if URL is likely a relay)
+        # 4. DeepSeek Key (only if URL is likely a relay or custom)
         ds_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
         if self.api_key and "deepseek.com" not in ds_url.lower():
-             providers.append({"name": "DeepSeek Relay", "key": self.api_key, "url": ds_url})
+             providers.append({
+                 "name": "DeepSeek Relay", 
+                 "key": self.api_key, 
+                 "url": ds_url,
+                 "model": os.getenv("DEEPSEEK_STT_MODEL", "whisper-1")
+             })
+
+        # Override model for primary if provided
+        primary_model = os.getenv("STT_MODEL", "whisper-1")
+        if stt_key and providers:
+            providers[0]["model"] = primary_model
 
         if not providers:
             print("[ERROR] [STT] No valid STT providers configured in environment variables.")
@@ -796,14 +1003,20 @@ class DeepSeekAPI:
                 if not provider["key"]: continue
                 
                 start_time = time.time()
-                print(f"[DEBUG] [STT] Attempting with {provider['name']} at {provider.get('url', 'default')}...")
+                model_name = provider.get("model", "whisper-1")
+                
+                # SiliconFlow default STT model correction
+                if provider["name"] == "SiliconFlow" and model_name == "Pro/OpenGVLab/InternVL2-8B":
+                     model_name = "SYSTRAN/faster-whisper-large-v3" # Popular on SiliconFlow
+                
+                print(f"[DEBUG] [STT] Attempting with {provider['name']} using model {model_name}...")
                 client = OpenAI(api_key=provider["key"], base_url=provider.get("url"))
                 
                 audio_file = io.BytesIO(audio_bytes)
                 audio_file.name = "audio.wav"
                 
                 transcript = client.audio.transcriptions.create(
-                    model="whisper-1", 
+                    model=model_name, 
                     file=audio_file,
                     timeout=25
                 )
@@ -992,13 +1205,14 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
                         bitmap_hex = get_raw_bitmap_hex(image_urls[0])
                         
                         job_id = str(uuid.uuid4())
-                        print_jobs.append({
+                        job_data = {
                             "job_id": job_id,
                             "image_url": processed_image,
                             "bitmap_hex": bitmap_hex,
                             "prompt": prompt,
                             "timestamp": time.time()
-                        })
+                        }
+                        save_print_job_to_db(job_data)
                         
                         action = {"type": "print", "prompt": prompt, "job_id": job_id, "image_url": processed_image, "bitmap_hex": bitmap_hex}
                         print(f"[DEBUG] [CORE] Drawing job created: {job_id}")
@@ -1020,7 +1234,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str) -> Dict[str, 
                             "raw_bitmaps": [bitmap_hex],
                             "timestamp": time.time()
                         }
-                        generation_history.append(history_entry)
+                        save_history_to_db(history_entry)
                         
                         if not text_response:
                             text_response = f"好的，我这就画一张{prompt}。"
@@ -1097,8 +1311,9 @@ async def get_print_jobs(request: Request):
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
         
-    if print_jobs:
-        job = print_jobs[0]
+    jobs = get_print_jobs_from_db()
+    if jobs:
+        job = jobs[0]
         return {
             "has_job": True,
             **job
@@ -1119,8 +1334,7 @@ async def complete_print_job(job_id: str, request: Request):
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
         
-    global print_jobs
-    print_jobs = [job for job in print_jobs if job["job_id"] != job_id]
+    delete_print_job_from_db(job_id)
     return {
         "success": True,
         "message": "Print job completed successfully",
