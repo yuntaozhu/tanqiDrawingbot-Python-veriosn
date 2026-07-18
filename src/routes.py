@@ -18,6 +18,7 @@ from src.utils import (
 )
 from src.services import (
     DeepSeekAPI, DoubaoAPI, ReplicateAPI, IdeogramAPI, generate_image_with_fallback,
+    VoiceInteractionService,
     CACHE_FILE, STT_CACHE_FILE, TTS_CACHE_FILE
 )
 from src.logger import setup_logger
@@ -884,18 +885,27 @@ async def handle_voice(request: Request):
         logger.warning("[CONN] Unauthorized voice attempt: missing x-device-token")
         raise HTTPException(status_code=401, detail="Unauthorized")
         
-    body = await request.body()
-    if not body:
-        logger.warning("[VOICE] Bad Request: empty body")
-        raise HTTPException(status_code=400, detail="Empty audio body received")
-    
-    logger.debug(f"[VOICE] Audio binary size: {len(body)} bytes")
     if not DEEPSEEK_API_KEY:
         logger.error("[VOICE] Internal Server Error: API key missing")
         raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY or API_KEY is missing")
         
+    voice_service = VoiceInteractionService.get_instance()
+    voice_service.clear_buffer(token)
+    
     try:
-        res = await process_llm_interaction(body, DEEPSEEK_API_KEY, device_token=token)
+        # Stream the incoming audio chunks in real-time to minimize transport latency
+        async for chunk in request.stream():
+            if chunk:
+                voice_service.append_chunk(token, chunk)
+                
+        audio_bytes = voice_service.get_full_audio(token)
+        logger.debug(f"[VOICE] Streaming buffer complete. Total size: {len(audio_bytes)} bytes")
+        
+        if not audio_bytes or len(audio_bytes) < 10:
+            logger.warning("[VOICE] Bad Request: empty or extremely small body")
+            raise HTTPException(status_code=400, detail="Empty audio body received")
+            
+        res = await process_llm_interaction(audio_bytes, DEEPSEEK_API_KEY, device_token=token)
         logger.debug(f"[VOICE] Response generated: {res.get('text_response')[:50]}...")
         return res
     except Exception as e:

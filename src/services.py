@@ -698,3 +698,34 @@ def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protag
             print(f"Engine {name} failed with error: {e}")
             
     return {"urls": None, "metadata": None}
+
+
+class VoiceInteractionService:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._buffers = {}  # Dict[str, io.BytesIO]
+
+    def get_buffer(self, device_token: str) -> io.BytesIO:
+        if device_token not in self._buffers:
+            self._buffers[device_token] = io.BytesIO()
+        return self._buffers[device_token]
+
+    def clear_buffer(self, device_token: str):
+        self._buffers[device_token] = io.BytesIO()
+
+    def append_chunk(self, device_token: str, chunk: bytes):
+        buf = self.get_buffer(device_token)
+        buf.write(chunk)
+        print(f"[DEBUG] [VoiceInteractionService] Appended {len(chunk)} bytes. Current size: {buf.tell()} bytes")
+
+    def get_full_audio(self, device_token: str) -> bytes:
+        buf = self.get_buffer(device_token)
+        return buf.getvalue()
+
