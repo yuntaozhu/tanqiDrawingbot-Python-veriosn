@@ -117,7 +117,7 @@ def record_audio_dynamic(filename="voice_input.wav", fs=16000):
 # Configuration & Dynamic Overrides
 # -----------------------------------------------------------------------------
 # Default to localhost if running inside AI Studio development environment, otherwise fallback to live URL
-DEFAULT_BASE_URL = os.getenv("BASE_URL", "http://localhost:3000")
+DEFAULT_BASE_URL = os.getenv("BASE_URL", "https://ais-dev-33rszcyydjjejpxqqhh4ub-21133040686.us-west2.run.app")
 DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "test-token-123")
 POLL_INTERVAL = 2.0  # Seconds
 
@@ -242,12 +242,37 @@ def play_audio(filepath):
     return False
 
 # -----------------------------------------------------------------------------
+# Connection Health Check
+# -----------------------------------------------------------------------------
+
+def check_server_health():
+    """
+    Validates the connection to the server before starting.
+    """
+    url = f"{BASE_URL}/health"
+    log(f"Checking server connection at {url}...", "INFO")
+    try:
+        res = requests.get(url, headers=get_headers(), timeout=5, allow_redirects=False)
+        if res.status_code == 200:
+            log("Server connection successful!", "INFO")
+            res.close()
+            return True
+        else:
+            log(f"Server connection failed. Status code: {res.status_code}", "ERROR")
+            res.close()
+            return False
+    except Exception as e:
+        log(f"Could not connect to server: {e}", "ERROR")
+        return False
+
+# -----------------------------------------------------------------------------
 # API Interactions
 # -----------------------------------------------------------------------------
 
 def get_headers(content_type='application/json'):
     return {
         'x-device-token': DEVICE_TOKEN,
+        'Authorization': f'Bearer {DEVICE_TOKEN}',
         'Content-Type': content_type,
         'User-Agent': 'SuperEgoDevice/1.1'
     }
@@ -483,6 +508,10 @@ def start_realtime_call_service():
     print(f"当前在线设备令牌: {DEVICE_TOKEN}")
     print(f"服务器端连接地址: {BASE_URL}")
     print("-"*50)
+    
+    if not check_server_health():
+        print("无法连接到服务器。请检查网络或服务器地址。退出中...")
+        return
     
     if HAS_AUDIO_INPUT:
         print("[状态] 🎤 麦克风硬件就绪！我们将默认采用【语音对话】通话模式。")
