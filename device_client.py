@@ -117,7 +117,7 @@ def record_audio_dynamic(filename="voice_input.wav", fs=16000):
 # Configuration & Dynamic Overrides
 # -----------------------------------------------------------------------------
 # Default to localhost if running inside AI Studio development environment, otherwise fallback to live URL
-DEFAULT_BASE_URL = os.getenv("BASE_URL", "https://ais-dev-33rszcyydjjejpxqqhh4ub-21133040686.us-west2.run.app")
+DEFAULT_BASE_URL = os.getenv("BASE_URL", "https://tanqibot.up.railway.app")
 DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "test-token-123")
 POLL_INTERVAL = 2.0  # Seconds
 
@@ -252,13 +252,14 @@ def check_server_health():
     url = f"{BASE_URL}/health"
     log(f"Checking server connection at {url}...", "INFO")
     try:
-        res = requests.get(url, headers=get_headers(), timeout=5, allow_redirects=False)
-        if res.status_code == 200:
+        # Allow redirects to follow through to the actual endpoint if needed.
+        res = requests.get(url, headers=get_headers(), timeout=5, allow_redirects=True)
+        if res.status_code == 200 and "/health" in res.url:
             log("Server connection successful!", "INFO")
             res.close()
             return True
         else:
-            log(f"Server connection failed. Status code: {res.status_code}", "ERROR")
+            log(f"Server connection failed. Status code: {res.status_code}, URL: {res.url}", "ERROR")
             res.close()
             return False
     except Exception as e:
