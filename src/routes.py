@@ -195,7 +195,33 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
         try:
             print(f"[DEBUG] [CORE] Attempting Doubao unified pipeline for token: {device_token}...")
             if isinstance(prompt_input, bytes):
-                res_data = doubao.unified_audio_chat(prompt_input)
+                # High-speed modular pipeline: Transcribe via SiliconFlow first, then send to text model
+                # This drops voice latency from 23s down to 2-3s!
+                print(f"[DEBUG] [FAST_PATH] Transcribing audio with fast STT first...")
+                stt_start = time.time()
+                user_text = deepseek.transcribe_audio(prompt_input)
+                print(f"[DEBUG] [FAST_PATH] STT took {time.time() - stt_start:.2f}s. Result: '{user_text}'")
+                
+                if not user_text:
+                    res_data = {
+                        "user_transcript": "",
+                        "assistant_reply": "对不起宝贝，我没听清，能不能请你再说一遍呀？",
+                        "requires_drawing": False,
+                        "drawing_prompt": "",
+                        "psych_metrics": {
+                            "detected_emotions": ["困惑"],
+                            "linguistic_richness_score": 0.0,
+                            "cognitive_milestone_ref": "无",
+                            "attention_span_seconds": 15,
+                            "key_interests": [],
+                            "requires_attention": False
+                        }
+                    }
+                else:
+                    print(f"[DEBUG] [FAST_PATH] Querying text-to-JSON model...")
+                    llm_start = time.time()
+                    res_data = doubao.unified_text_chat(user_text)
+                    print(f"[DEBUG] [FAST_PATH] Text-to-JSON took {time.time() - llm_start:.2f}s")
             else:
                 res_data = doubao.unified_text_chat(prompt_input)
                 

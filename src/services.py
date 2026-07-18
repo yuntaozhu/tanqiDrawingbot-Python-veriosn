@@ -10,7 +10,7 @@ import requests
 import replicate
 
 from src.config import (
-    ARK_API_KEY, ARK_AUDIO_MODEL, ARK_DRAW_MODEL,
+    ARK_API_KEY, ARK_AUDIO_MODEL, ARK_DRAW_MODEL, ARK_TTS_MODEL,
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL,
     REPLICATE_API_TOKEN, IDEOGRAM_API_KEY,
     STT_API_KEY, STT_BASE_URL, STT_MODEL,
@@ -232,15 +232,24 @@ class DeepSeekAPI:
         print(f"[DEBUG] [TTS] Generating speech for: '{text[:50]}...'")
         providers = []
         
-        # 1. Primary TTS from Env
+        # 1. Doubao Voice Design (User requested "使用Doubao-音色设计")
+        if ARK_API_KEY:
+             providers.append({
+                 "name": "Doubao-VoiceDesign",
+                 "key": ARK_API_KEY,
+                 "url": "https://ark.cn-beijing.volces.com/api/v3",
+                 "model": ARK_TTS_MODEL
+             })
+        
+        # 2. Primary TTS from Env
         if TTS_API_KEY:
              providers.append({"name": "Primary (Env)", "key": TTS_API_KEY, "url": TTS_BASE_URL})
              
-        # 2. SiliconFlow Fallback
+        # 3. SiliconFlow Fallback
         if SILICONFLOW_API_KEY:
             providers.append({"name": "SiliconFlow", "key": SILICONFLOW_API_KEY, "url": "https://api.siliconflow.cn/v1"})
             
-        # 3. OpenAI Fallback
+        # 4. OpenAI Fallback
         if OPENAI_API_KEY:
             providers.append({"name": "OpenAI", "key": OPENAI_API_KEY, "url": "https://api.openai.com/v1"})
 
@@ -256,9 +265,20 @@ class DeepSeekAPI:
                 start_time = time.time()
                 print(f"[DEBUG] [TTS] Attempting with {provider['name']} at {provider.get('url', 'default')}...")
                 client = OpenAI(api_key=provider["key"], base_url=provider.get("url"))
+                
+                # Use correct model and voice depending on provider
+                model_name = "tts-1"
+                voice_name = "alloy"
+                if provider["name"] == "Doubao-VoiceDesign":
+                    model_name = provider.get("model", "Doubao-Seed-VoiceDesign-1.0")
+                    voice_name = "一个极其温柔、友好、可爱的5岁小朋友，用稚嫩温和的语气说话"
+                elif "siliconflow.cn" in provider.get("url", "").lower():
+                    model_name = "FunAudioLLM/CosyVoice2-0.5B"
+                    voice_name = "fc_female"
+                    
                 response = client.audio.speech.create(
-                    model="tts-1",
-                    voice="alloy",
+                    model=model_name,
+                    voice=voice_name,
                     input=text,
                     timeout=20
                 )
