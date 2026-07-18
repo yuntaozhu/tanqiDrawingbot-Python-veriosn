@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -13,6 +14,9 @@ logger = logging.getLogger("device_client")
 # -----------------------------------------------------------------------------
 # Session Management
 # -----------------------------------------------------------------------------
+# Toggle to False if you encounter SSL EOF errors in constrained environments
+VERIFY_SSL = os.getenv("VERIFY_SSL", "True").lower() == "true"
+
 def create_session():
     session = requests.Session()
     # Retry strategy: retry up to 3 times for connection/SSL errors
@@ -25,6 +29,7 @@ def create_session():
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+    session.verify = VERIFY_SSL
     return session
 
 session = create_session()
