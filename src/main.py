@@ -1,8 +1,17 @@
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from src.routes import router
+from src.logger import setup_logger
+
+logger = setup_logger("main")
 
 app = FastAPI(title="Toddler Drawing Dreamer API")
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.debug(f"Request Headers: {dict(request.headers)}")
+    response = await call_next(request)
+    return response
 
 app.add_middleware(
     CORSMiddleware,
