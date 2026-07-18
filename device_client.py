@@ -253,7 +253,7 @@ def check_server_health():
     log(f"Checking server connection at {url}...", "INFO")
     try:
         # Allow redirects to follow through to the actual endpoint if needed.
-        res = requests.get(url, headers=get_headers(), timeout=5, allow_redirects=True)
+        res = requests.get(url, headers=get_headers(), timeout=15, allow_redirects=True)
         if res.status_code == 200 and "/health" in res.url:
             log("Server connection successful!", "INFO")
             res.close()
