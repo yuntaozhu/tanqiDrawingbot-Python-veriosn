@@ -1,12 +1,33 @@
 import os
 import sys
 import logging
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # -----------------------------------------------------------------------------
 # Logging Setup
 # -----------------------------------------------------------------------------
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("device_client")
+
+# -----------------------------------------------------------------------------
+# Session Management
+# -----------------------------------------------------------------------------
+def create_session():
+    session = requests.Session()
+    # Retry strategy: retry up to 3 times for connection/SSL errors
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+session = create_session()
 
 def log(msg, level="INFO"):
     if level == "DEBUG":
@@ -253,7 +274,7 @@ def check_server_health():
     log(f"Checking server connection at {url}...", "INFO")
     try:
         # Allow redirects to follow through to the actual endpoint if needed.
-        res = requests.get(url, headers=get_headers(), timeout=15, allow_redirects=True)
+        res = session.get(url, headers=get_headers(), timeout=15, allow_redirects=True)
         if res.status_code == 200 and "/health" in res.url:
             log("Server connection successful!", "INFO")
             res.close()
@@ -292,7 +313,7 @@ def send_voice_command():
     
     start_time = time.time()
     try:
-        res = requests.post(url, data=audio_data, headers=headers)
+        res = session.post(url, data=audio_data, headers=headers)
         elapsed = time.time() - start_time
         log(f"Response Status: {res.status_code} (took {elapsed:.2f}s)", "DEBUG")
         
@@ -323,7 +344,7 @@ def check_print_jobs():
     headers = get_headers()
     
     try:
-        res = requests.get(url, headers=headers, allow_redirects=False)
+        res = session.get(url, headers=headers, allow_redirects=False)
         if res.status_code == 200:
             job = res.json()
             res.close()
@@ -353,7 +374,7 @@ def complete_print_job(job_id):
     url = f"{BASE_URL}/api/device/v1/print-jobs/{job_id}/complete"
     
     try:
-        res = requests.post(url, headers=get_headers())
+        res = session.post(url, headers=get_headers())
         if res.status_code == 200:
             log(f"Job {job_id} marked complete.")
         else:
@@ -373,7 +394,7 @@ def send_chat_command(text, silent=False):
     headers = get_headers()
     
     try:
-        res = requests.post(url, json={"text": text}, headers=headers, allow_redirects=False)
+        res = session.post(url, json={"text": text}, headers=headers, allow_redirects=False)
         if res.status_code == 200:
             try:
                 data = res.json()
@@ -448,7 +469,7 @@ def send_voice_file(filepath, silent=False):
             log(f"Sending audio file: {filepath} ({len(audio_data)} bytes)", "DEBUG")
         
         headers = get_headers('audio/wav')
-        res = requests.post(url, data=audio_data, headers=headers, allow_redirects=False)
+        res = session.post(url, data=audio_data, headers=headers, allow_redirects=False)
         
         if res.status_code == 200:
             try:
