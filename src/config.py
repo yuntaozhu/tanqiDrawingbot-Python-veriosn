@@ -14,12 +14,24 @@ DATABASE_URL = "sqlite:///./app_history.db"
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") or os.getenv("API_KEY")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
-STT_API_KEY = os.getenv("STT_API_KEY")
-STT_BASE_URL = os.getenv("STT_BASE_URL")
+_stt_key = os.getenv("STT_API_KEY")
+_stt_url = os.getenv("STT_BASE_URL")
+if _stt_key and _stt_url:
+    if _stt_key.startswith("http") or "api." in _stt_key:
+        _stt_key, _stt_url = _stt_url, _stt_key
+
+STT_API_KEY = _stt_key
+STT_BASE_URL = _stt_url
 STT_MODEL = os.getenv("STT_MODEL")
 
-TTS_API_KEY = os.getenv("TTS_API_KEY")
-TTS_BASE_URL = os.getenv("TTS_BASE_URL")
+_tts_key = os.getenv("TTS_API_KEY")
+_tts_url = os.getenv("TTS_BASE_URL")
+if _tts_key and _tts_url:
+    if _tts_key.startswith("http") or "api." in _tts_key:
+        _tts_key, _tts_url = _tts_url, _tts_key
+
+TTS_API_KEY = _tts_key
+TTS_BASE_URL = _tts_url
 
 SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
 SILICONFLOW_STT_MODEL = os.getenv("SILICONFLOW_STT_MODEL", "SYSTRAN/faster-whisper-large-v3")

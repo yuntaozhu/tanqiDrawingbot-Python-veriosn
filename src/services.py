@@ -217,19 +217,21 @@ class DeepSeekAPI:
         return ""
 
     @retry_with_backoff(max_retries=2)
-    def generate_speech(self, text: str) -> Optional[str]:
+    def generate_speech(self, text: str, voice_name: Optional[str] = None) -> Optional[str]:
         """Convert text to speech with fallback support for multiple providers."""
         if not text:
             return None
         
         global TTS_CACHE
-        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+        # Include voice name in cache key to avoid collisions between different voices
+        cache_key_source = f"{text}:{voice_name or 'default'}"
+        text_hash = hashlib.md5(cache_key_source.encode('utf-8')).hexdigest()
         
         if text_hash in TTS_CACHE:
             print(f"[DEBUG] [TTS] Cache hit for text hash: {text_hash}")
             return TTS_CACHE[text_hash].get("audio_base64")
 
-        print(f"[DEBUG] [TTS] Generating speech for: '{text[:50]}...'")
+        print(f"[DEBUG] [TTS] Generating speech for: '{text[:50]}...' with voice config: {voice_name}")
         providers = []
         
         # 1. Doubao Voice Design (User requested "使用Doubao-音色设计")
@@ -244,10 +246,10 @@ class DeepSeekAPI:
         # 2. Primary TTS from Env
         if TTS_API_KEY:
              providers.append({"name": "Primary (Env)", "key": TTS_API_KEY, "url": TTS_BASE_URL})
-             
+              
         # 3. SiliconFlow Fallback
         if SILICONFLOW_API_KEY:
-            providers.append({"name": "SiliconFlow", "key": SILICONFLOW_API_KEY, "url": "https://api.siliconflow.cn/v1"})
+             providers.append({"name": "SiliconFlow", "key": SILICONFLOW_API_KEY, "url": "https://api.siliconflow.cn/v1"})
             
         # 4. OpenAI Fallback
         if OPENAI_API_KEY:
@@ -268,17 +270,23 @@ class DeepSeekAPI:
                 
                 # Use correct model and voice depending on provider
                 model_name = "tts-1"
-                voice_name = "alloy"
+                current_voice = voice_name
+                
                 if provider["name"] == "Doubao-VoiceDesign":
                     model_name = provider.get("model", "Doubao-Seed-VoiceDesign-1.0")
-                    voice_name = "一个极其温柔、友好、可爱的5岁小朋友，用稚嫩温和的语气说话"
+                    current_voice = current_voice or "一个极其温柔、友好、可爱的5岁小朋友，用稚嫩温和的语气说话"
                 elif "siliconflow.cn" in provider.get("url", "").lower():
                     model_name = "FunAudioLLM/CosyVoice2-0.5B"
-                    voice_name = "fc_female"
+                    # Default to Anna (beautiful storytelling child voice)
+                    current_voice = current_voice or "FunAudioLLM/CosyVoice2-0.5B:anna"
+                    if not current_voice.startswith("FunAudioLLM/CosyVoice2-0.5B:"):
+                        current_voice = f"FunAudioLLM/CosyVoice2-0.5B:{current_voice}"
+                else:
+                    current_voice = current_voice or "alloy"
                     
                 response = client.audio.speech.create(
                     model=model_name,
-                    voice=voice_name,
+                    voice=current_voice,
                     input=text,
                     timeout=20
                 )

@@ -57,6 +57,12 @@ class PsychVectorDB(Base):
     metadata_json = Column(Text) # JSON serialized dict
     timestamp = Column(Float)
 
+class DeviceSettingsDB(Base):
+    __tablename__ = "device_settings"
+    device_token = Column(String, primary_key=True, index=True)
+    voice_name = Column(String, default="FunAudioLLM/CosyVoice2-0.5B:anna")
+    timestamp = Column(Float)
+
 Base.metadata.create_all(bind=engine)
 
 def save_history_to_db(entry):
@@ -225,5 +231,43 @@ def query_psych_vectors(device_token: str) -> List[Dict[str, Any]]:
     except Exception as e:
         print(f"[ERROR] [DB] Failed to query psych vectors: {e}")
         return []
+    finally:
+        db.close()
+
+def save_device_settings(device_token: str, voice_name: str):
+    db = SessionLocal()
+    try:
+        db_settings = db.query(DeviceSettingsDB).filter(DeviceSettingsDB.device_token == device_token).first()
+        if db_settings:
+            db_settings.voice_name = voice_name
+            db_settings.timestamp = time.time()
+        else:
+            db_settings = DeviceSettingsDB(
+                device_token=device_token,
+                voice_name=voice_name,
+                timestamp=time.time()
+            )
+            db.add(db_settings)
+        db.commit()
+        print(f"[DEBUG] [DB] Saved settings for {device_token}: {voice_name}")
+    except Exception as e:
+        print(f"[ERROR] [DB] Failed to save device settings: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+def get_device_settings(device_token: str) -> str:
+    db = SessionLocal()
+    try:
+        # We default to anna as the highly-polished child storyteller voice
+        if not device_token:
+            return "FunAudioLLM/CosyVoice2-0.5B:anna"
+        settings = db.query(DeviceSettingsDB).filter(DeviceSettingsDB.device_token == device_token).first()
+        if settings and settings.voice_name:
+            return settings.voice_name
+        return "FunAudioLLM/CosyVoice2-0.5B:anna"
+    except Exception as e:
+        print(f"[ERROR] [DB] Failed to get device settings: {e}")
+        return "FunAudioLLM/CosyVoice2-0.5B:anna"
     finally:
         db.close()

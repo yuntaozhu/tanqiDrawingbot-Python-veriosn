@@ -11,7 +11,8 @@ from src.config import DEEPSEEK_API_KEY, ADMIN_KEY
 from src.database import (
     save_history_to_db, get_history_from_db,
     save_feedback_to_db, save_print_job_to_db, get_print_jobs_from_db, delete_print_job_from_db,
-    save_psych_vector, query_psych_vectors
+    save_psych_vector, query_psych_vectors,
+    save_device_settings, get_device_settings
 )
 from src.utils import (
     process_line_art_image, get_raw_bitmap_hex, get_embedded_bitmap, get_image_metadata
@@ -195,6 +196,43 @@ def parse_bool(val) -> bool:
     return False
 
 
+def check_assistant_drawing_trigger(text: str) -> bool:
+    if not text:
+        return False
+    text_lower = text.lower()
+    
+    # 1. Direct explicit drawing initiation phrases
+    direct_triggers = [
+        "我们一起来画", "我为你画", "我画了", "为你画了", "开始画", 
+        "画一个", "画个", "画一只", "画一幅", "画画", "画张", "画条",
+        "这就画", "这就给你画", "画给你", "正在画", "准备画", "开始为你画",
+        "画好啦", "画好哈", "画好喽", "画了喔", "画好了", "画出来", "把...画", "给你画", "帮宝贝画"
+    ]
+    if any(trig in text_lower for trig in direct_triggers):
+        return True
+        
+    # 2. Semantic action cues when "画" is mentioned
+    if "画" in text_lower:
+        # If it's a question asking the child what/how to draw, don't trigger.
+        is_question = any(q in text_lower for q in [
+            "你想画", "你要画", "你想画个", "画什么", "画哪个", "画几", 
+            "要不要画", "想不想画", "会画什么", "喜欢画"
+        ])
+        if not is_question:
+            # Declarations/promises to draw
+            declarations = [
+                "变成", "变出", "变一幅", "变一个", "变一只",
+                "我这就", "老师这就", "我来给", "我为你", "帮宝贝", "帮你想", 
+                "这就画", "我画了", "开始画", "准备画", "正在画", "画好啦", "画好了", 
+                "马上把", "马上画", "马上为", "马上给", "马上", "现在就", "等下就能看到", 
+                "等一下就能看到", "把这个", "魔法", "呈现"
+            ]
+            if any(dec in text_lower for dec in declarations):
+                return True
+                
+    return False
+
+
 def extract_drawing_subject(text: str) -> str:
     if not text:
         return ""
@@ -203,7 +241,9 @@ def extract_drawing_subject(text: str) -> str:
         "我想画一个", "我想画一幅", "我想画一只", "我想画一条", "我想画一张", "我想画个", "我想画只", "我想画张", "我想画条", "我想画些", "我想画", 
         "帮我画一个", "帮我画一幅", "帮我画一只", "帮我画一条", "帮我画一张", "帮我画个", "帮我画只", "帮我画条", "帮我画",
         "可以画一个", "可以画一幅", "可以画一只", "可以画一条", "可以画一张", "可以画个", "可以画",
-        "画一个", "画一幅", "画一只", "画一条", "画一张", "画只", "画张", "画条", "画画", "画个", "画出", "画一画", "画"
+        "画一个", "画一幅", "画一只", "画一条", "画一张", "画只", "画张", "画条", "画画", "画个", "画出", "画一画", "画",
+        "我想要画一个", "我想要画一只", "我想要画条", "我想要画", "想要画一个", "想要画", "我要画一个", "我要画",
+        "是一个", "是一幅", "是一只", "是一条", "是一张", "是个", "是只", "是条", "是张", "我的是", "是"
     ]
     subject = text.strip()
     for p in prefixes:
@@ -336,9 +376,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                 
                 # Apply robust checks/heuristics
                 user_text_lower = user_text.lower() if user_text else ""
-                text_response_lower = text_response.lower() if text_response else ""
                 drawing_keywords = ["画画", "画一个", "画只", "画张", "画条", "画一幅", "画一画", "想要画", "帮我画", "可以画", "画个", "画出", "画一画", "画"]
-                assistant_drawing_triggers = ["我们一起来画", "我为你画", "我画了", "为你画了", "开始画", "画一个", "画个", "画一只", "画一幅", "画画", "画张", "画条"]
                 
                 # 1. If user transcript explicitly asks to draw, but the LLM boolean was False
                 if user_text_lower and any(kw in user_text_lower for kw in drawing_keywords) and not requires_drawing:
@@ -346,7 +384,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                     requires_drawing = True
                     
                 # 1.5 If teacher response explicitly confirms drawing, force requires_drawing to True
-                if text_response_lower and any(trig in text_response_lower for trig in assistant_drawing_triggers) and not requires_drawing:
+                if check_assistant_drawing_trigger(text_response) and not requires_drawing:
                     print(f"[DEBUG] [HEURISTIC] Forcing requires_drawing=True due to drawing triggers in assistant reply: '{text_response}'")
                     requires_drawing = True
 
@@ -473,7 +511,8 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                 audio_base64 = None
                 if text_response:
                     try:
-                        audio_base64 = deepseek.generate_speech(text_response)
+                        voice_config = get_device_settings(device_token)
+                        audio_base64 = deepseek.generate_speech(text_response, voice_name=voice_config)
                     except Exception as tts_err:
                         print(f"[ERROR] [DOUBAO] Speech gen failed: {tts_err}")
                         
@@ -509,7 +548,8 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
             print("[DEBUG] [CORE] STT returned empty text. Returning fallback message.")
             error_msg = "对不起，我没听清，能不能请你再说一遍？" 
             try:
-                audio_base64 = deepseek.generate_speech(error_msg)
+                voice_config = get_device_settings(device_token)
+                audio_base64 = deepseek.generate_speech(error_msg, voice_name=voice_config)
             except Exception as e:
                 print(f"[ERROR] [CORE] Failed to generate fallback speech: {e}")
                 audio_base64 = None
@@ -621,14 +661,12 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
         # Backup heuristic for DeepSeek pipeline when no drawing was generated via tool calls
         if not action:
             user_text_lower = user_text.lower() if user_text else ""
-            text_response_lower = text_response.lower() if text_response else ""
             drawing_keywords = ["画画", "画一个", "画只", "画张", "画条", "画一幅", "画一画", "想要画", "帮我画", "可以画", "画个", "画出", "画一画", "画"]
-            assistant_drawing_triggers = ["我们一起来画", "我为你画", "我画了", "为你画了", "开始画", "画一个", "画个", "画一只", "画一幅", "画画", "画张", "画条"]
             
             should_draw = False
             if user_text_lower and any(kw in user_text_lower for kw in drawing_keywords):
                 should_draw = True
-            elif text_response_lower and any(trig in text_response_lower for trig in assistant_drawing_triggers):
+            elif check_assistant_drawing_trigger(text_response):
                 should_draw = True
                 
             if should_draw:
@@ -693,7 +731,8 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
         audio_base64 = None
         if text_response:
             try:
-                audio_base64 = deepseek.generate_speech(text_response)
+                voice_config = get_device_settings(device_token)
+                audio_base64 = deepseek.generate_speech(text_response, voice_name=voice_config)
             except Exception as e:
                 print(f"[ERROR] [CORE] Failed to generate final response speech: {e}")
                 audio_base64 = None
@@ -975,9 +1014,24 @@ async def clear_cache(request: Request):
     print("All caches cleared manually.")
     return {"status": "success", "message": "All caches cleared"}
 
+@router.post("/api/admin/settings/{device_token}")
+async def update_device_settings(device_token: str, request: Request):
+    try:
+        body = await request.json()
+        voice_name = body.get("voice_name")
+        if not voice_name:
+            raise HTTPException(status_code=400, detail="Missing voice_name")
+        
+        save_device_settings(device_token, voice_name)
+        return {"success": True, "message": "Settings updated successfully", "voice_name": voice_name}
+    except Exception as e:
+        logger.error(f"[SETTINGS] Failed to update settings for {device_token}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/api/admin/reports/{device_token}")
 async def get_admin_report(device_token: str):
     data = generate_growths_summary(device_token)
+    active_voice = get_device_settings(device_token)
     
     # Render Trend SVG
     trend_svg = ""
@@ -1143,6 +1197,63 @@ async def get_admin_report(device_token: str):
             <!-- PRE_ALERT_BANNER -->
             {alert_banner}
 
+            <!-- VOICE SETTINGS PANEL -->
+            <div class="bg-white rounded-3xl p-6 md:p-8 border border-gray-100 shadow-sm mb-8">
+                <div class="flex items-center space-x-3 mb-4">
+                    <span class="text-3xl">🧸</span>
+                    <div>
+                        <h2 class="text-xl font-bold text-gray-800">小探宝音色专属配置</h2>
+                        <p class="text-xs text-gray-400">为孩子定制最自然的回复声音，支持中英文双语、温暖稚嫩的优质儿童及温馨少女原声</p>
+                    </div>
+                </div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
+                    <!-- Option 1: Anna -->
+                    <div id="voice-anna" onclick="selectVoice('anna')" class="voice-card cursor-pointer relative p-5 rounded-2xl border-2 transition-all duration-200 hover:shadow-md flex flex-col justify-between {'border-indigo-500 bg-indigo-50/30' if active_voice.endswith(':anna') or active_voice == 'anna' else 'border-gray-100 hover:border-gray-200'}">
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="font-bold text-gray-800 text-sm md:text-base flex items-center gap-1.5">👧 温暖童真 (少女) <span class="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded-md font-medium">推荐</span></span>
+                                <span class="radio-indicator text-indigo-500 text-lg">{'●' if active_voice.endswith(':anna') or active_voice == 'anna' else '○'}</span>
+                            </div>
+                            <p class="text-xs text-gray-500 leading-relaxed">最受欢迎！中英文双语，声线极其亲切、温暖、活泼，犹如温柔的小姐姐，最适合陪伴孩子学习与玩耍。</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Option 2: Mia -->
+                    <div id="voice-mia" onclick="selectVoice('mia')" class="voice-card cursor-pointer relative p-5 rounded-2xl border-2 transition-all duration-200 hover:shadow-md flex flex-col justify-between {'border-indigo-500 bg-indigo-50/30' if active_voice.endswith(':mia') or active_voice == 'mia' else 'border-gray-100 hover:border-gray-200'}">
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="font-bold text-gray-800 text-sm md:text-base flex items-center gap-1.5">👶 俏皮活泼 (可爱小女孩)</span>
+                                <span class="radio-indicator text-indigo-500 text-lg">{'●' if active_voice.endswith(':mia') or active_voice == 'mia' else '○'}</span>
+                            </div>
+                            <p class="text-xs text-gray-500 leading-relaxed">稚嫩可爱，充满好奇心与探求朝气，元气满满，极富感染力，能迅速与3-8岁的小朋友建立深厚的玩伴信任。</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Option 3: Bella -->
+                    <div id="voice-bella" onclick="selectVoice('bella')" class="voice-card cursor-pointer relative p-5 rounded-2xl border-2 transition-all duration-200 hover:shadow-md flex flex-col justify-between {'border-indigo-500 bg-indigo-50/30' if active_voice.endswith(':bella') or active_voice == 'bella' else 'border-gray-100 hover:border-gray-200'}">
+                        <div>
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="font-bold text-gray-800 text-sm md:text-base flex items-center gap-1.5">🌸 甜美贴心 (温馨女声)</span>
+                                <span class="radio-indicator text-indigo-500 text-lg">{'●' if active_voice.endswith(':bella') or active_voice == 'bella' else '○'}</span>
+                            </div>
+                            <p class="text-xs text-gray-500 leading-relaxed">声线甜美细腻，温柔体贴，具有极强的情感疗愈效果，最适合在小朋友情绪不稳定或具有分离焦虑时给予支持。</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="mt-6 flex flex-wrap items-center justify-between gap-4 border-t border-gray-50 pt-5">
+                    <div class="text-xs text-gray-400 flex items-center gap-1">
+                        <span>当前音色:</span>
+                        <span id="current-voice-label" class="font-semibold text-gray-700 bg-gray-100 px-2.5 py-1 rounded-md">{'温暖童真 (少女/Anna)' if active_voice.endswith(':anna') or active_voice == 'anna' else '俏皮活泼 (可爱小女孩/Mia)' if active_voice.endswith(':mia') or active_voice == 'mia' else '甜美贴心 (温馨女声/Bella)' if active_voice.endswith(':bella') or active_voice == 'bella' else '温暖童真 (少女/Anna)'}</span>
+                    </div>
+                    
+                    <button id="save-settings-btn" onclick="saveVoiceSettings()" class="bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold px-6 py-2.5 rounded-xl shadow-md transition-all duration-150 transform hover:-translate-y-0.5 active:translate-y-0 text-sm flex items-center gap-2">
+                        <span>💾 保存音色配置</span>
+                    </button>
+                </div>
+            </div>
+
             <!-- STATS COUNTERS -->
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                 <div class="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm flex items-center space-x-4">
@@ -1232,6 +1343,70 @@ async def get_admin_report(device_token: str):
                 <p class="mt-1">通过先进多模态大模型及向量数据库，提供科学非介入式的早期成长心理支持</p>
             </div>
         </div>
+
+        <script>
+            let selectedVoice = "{'anna' if active_voice.endswith(':anna') or active_voice == 'anna' else 'mia' if active_voice.endswith(':mia') or active_voice == 'mia' else 'bella' if active_voice.endswith(':bella') or active_voice == 'bella' else 'anna'}";
+            
+            function selectVoice(voiceId) {{
+                selectedVoice = voiceId;
+                
+                document.querySelectorAll('.voice-card').forEach(card => {{
+                    card.classList.remove('border-indigo-500', 'bg-indigo-50/30');
+                    card.classList.add('border-gray-100');
+                    card.querySelector('.radio-indicator').innerText = '○';
+                }});
+                
+                const activeCard = document.getElementById('voice-' + voiceId);
+                activeCard.classList.remove('border-gray-100');
+                activeCard.classList.add('border-indigo-500', 'bg-indigo-50/30');
+                activeCard.querySelector('.radio-indicator').innerText = '●';
+                
+                const labelMap = {{
+                    'anna': '温暖童真 (少女/Anna)',
+                    'mia': '俏皮活泼 (可爱小女孩/Mia)',
+                    'bella': '甜美贴心 (温馨女声/Bella)'
+                }};
+                document.getElementById('current-voice-label').innerText = labelMap[voiceId];
+            }}
+            
+            async function saveVoiceSettings() {{
+                const btn = document.getElementById('save-settings-btn');
+                const origText = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '⚡ 正在保存...';
+                
+                try {{
+                    const response = await fetch('/api/admin/settings/{device_token}', {{
+                        method: 'POST',
+                        headers: {{
+                            'Content-Type': 'application/json'
+                        }},
+                        body: JSON.stringify({{
+                            voice_name: 'FunAudioLLM/CosyVoice2-0.5B:' + selectedVoice
+                        }})
+                    }});
+                    
+                    const resData = await response.json();
+                    if (resData.success) {{
+                        btn.innerHTML = '✅ 保存成功！';
+                        btn.classList.remove('from-indigo-500', 'to-purple-600');
+                        btn.classList.add('from-emerald-500', 'to-teal-600');
+                        setTimeout(() => {{
+                            btn.innerHTML = origText;
+                            btn.disabled = false;
+                            btn.classList.remove('from-emerald-500', 'to-teal-600');
+                            btn.classList.add('from-indigo-500', 'to-purple-600');
+                        }}, 2000);
+                    }} else {{
+                        throw new Error(resData.detail || '保存失败');
+                    }}
+                }} catch (err) {{
+                    alert('保存配置出错: ' + err.message);
+                    btn.innerHTML = origText;
+                    btn.disabled = false;
+                }}
+            }}
+        </script>
     </body>
     </html>
     """
