@@ -447,8 +447,7 @@ class DoubaoAPI:
   "psych_metrics": {
     "detected_emotions": ["（识别出小朋友说话时的主要情绪，如：快乐、同理心、悲伤、焦虑、好奇、愤怒等，可以填1-2个）"],
     "linguistic_richness_score": （小数值，范围0.0~1.0，根据小朋友话语的句子完整度和词汇丰富度进行打分）,
-    "cognitive_milestone_
-    ref": "（根据小朋友表达的特征，标注其当前的心理与认知发展特征，如：感知运动阶段、前运算符号思维、同理心萌芽等）",
+    "cognitive_milestone_ref": "（根据小朋友表达的特征，标注其当前的心理与认知发展特征，如：感知运算阶段、前运算符号思维、同理心萌芽等）",
     "attention_span_seconds": 15（估算的小朋友专注时长，默认15即可）,
     "key_interests": ["（提取小朋友话语中的核心关切或兴趣，如：小动物、天气、玩具、大自然等，可填1-2个）"],
     "requires_attention": false（布尔值，若识别到极度消极、焦虑、恐惧、分离焦虑或明显异常心理，则填true，否则为false）

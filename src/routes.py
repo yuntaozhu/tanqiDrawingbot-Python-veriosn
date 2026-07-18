@@ -204,16 +204,65 @@ def extract_drawing_subject(text: str) -> str:
         "可以画一个", "可以画一幅", "可以画一只", "可以画一条", "可以画一张", "可以画个", "可以画",
         "画一个", "画一幅", "画一只", "画一条", "画一张", "画只", "画张", "画条", "画画", "画个", "画出", "画一画", "画"
     ]
-    subject = text
+    subject = text.strip()
     for p in prefixes:
         if subject.startswith(p):
             subject = subject[len(p):]
             break
-    # Remove common suffixes/punctuation
+    # Remove common suffixes/punctuation recursively
     subject = subject.strip("。，！？.!? ")
-    if subject.endswith("吧") or subject.endswith("呀") or subject.endswith("呗") or subject.endswith("呢"):
-        subject = subject[:-1]
+    while True:
+        changed = False
+        for suffix in ["吧", "呀", "呗", "呢", "吗", "哈", "啦", "了", "的", "不"]:
+            if subject.endswith(suffix):
+                subject = subject[:-len(suffix)].strip()
+                changed = True
+        if not changed:
+            break
     return subject.strip()
+
+
+def extract_drawing_subject_advanced(user_text: str, assistant_reply: str) -> str:
+    # 1. Try to extract from user_text using prefixes
+    subject = extract_drawing_subject(user_text)
+    if subject and len(subject) > 0 and subject not in ["画", "画画", "画图", "一幅画", "一幅", "画个"]:
+        return subject
+        
+    # 2. Try to extract from assistant_reply using regex patterns
+    import re
+    if assistant_reply:
+        # Pattern 1: 你想画([^呀！，。？\s]+)[呀！，。？]
+        m = re.search(r"你想画([^呀！，。？\s]+)", assistant_reply)
+        if m:
+            sub = extract_drawing_subject(m.group(1).strip())
+            if sub and len(sub) > 0 and sub not in ["画", "画画", "画图", "一幅画", "一幅", "画个"]:
+                return sub
+        # Pattern 2: 我们一起来画([^吧！，。？\s]+)
+        m = re.search(r"我们一起来画([^吧！，。？\s]+)", assistant_reply)
+        if m:
+            sub = extract_drawing_subject(m.group(1).strip())
+            if sub and len(sub) > 0 and sub not in ["画", "画画", "画图", "一幅画", "一幅", "画个"]:
+                return sub
+        # Pattern 3: 画一个([^！，。？\s]+)
+        m = re.search(r"画一个([^！，。？\s]+)", assistant_reply)
+        if m:
+            sub = extract_drawing_subject(m.group(1).strip())
+            if sub and len(sub) > 0 and sub not in ["画", "画画", "画图", "一幅画", "一幅", "画个"]:
+                return sub
+        # Pattern 4: 画幅([^！，。？\s]+)
+        m = re.search(r"画幅([^！，。？\s]+)", assistant_reply)
+        if m:
+            sub = extract_drawing_subject(m.group(1).strip())
+            if sub and len(sub) > 0 and sub not in ["画", "画画", "画图", "一幅画", "一幅", "画个"]:
+                return sub
+        # Pattern 5: 画只([^！，。？\s]+)
+        m = re.search(r"画只([^！，。？\s]+)", assistant_reply)
+        if m:
+            sub = extract_drawing_subject(m.group(1).strip())
+            if sub and len(sub) > 0 and sub not in ["画", "画画", "画图", "一幅画", "一幅", "画个"]:
+                return sub
+                
+    return subject
 
 
 async def process_llm_interaction(prompt_input: Any, api_key: str, device_token: str = None) -> Dict[str, Any]:
@@ -286,24 +335,41 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                 
                 # Apply robust checks/heuristics
                 user_text_lower = user_text.lower() if user_text else ""
+                text_response_lower = text_response.lower() if text_response else ""
                 drawing_keywords = ["画画", "画一个", "画只", "画张", "画条", "画一幅", "画一画", "想要画", "帮我画", "可以画", "画个", "画出", "画一画", "画"]
+                assistant_drawing_triggers = ["我们一起来画", "我为你画", "我画了", "为你画了", "开始画", "画一个", "画个", "画一只", "画一幅", "画画", "画张", "画条"]
                 
                 # 1. If user transcript explicitly asks to draw, but the LLM boolean was False
                 if user_text_lower and any(kw in user_text_lower for kw in drawing_keywords) and not requires_drawing:
                     print(f"[DEBUG] [HEURISTIC] Forcing requires_drawing=True due to drawing keywords in user transcript: '{user_text}'")
                     requires_drawing = True
                     
+                # 1.5 If teacher response explicitly confirms drawing, force requires_drawing to True
+                if text_response_lower and any(trig in text_response_lower for trig in assistant_drawing_triggers) and not requires_drawing:
+                    print(f"[DEBUG] [HEURISTIC] Forcing requires_drawing=True due to drawing triggers in assistant reply: '{text_response}'")
+                    requires_drawing = True
+
                 # 2. If drawing_prompt is provided but requires_drawing is False, force it to True
                 if drawing_prompt.strip() and not requires_drawing:
                     print(f"[DEBUG] [HEURISTIC] Forcing requires_drawing=True because drawing_prompt is present: '{drawing_prompt}'")
                     requires_drawing = True
                     
-                # 3. If requires_drawing is True but drawing_prompt is empty, extract from user transcript
+                # 3. If requires_drawing is True but drawing_prompt is empty, extract from user transcript or assistant reply
                 if requires_drawing and not drawing_prompt.strip():
-                    extracted = extract_drawing_subject(user_text)
+                    extracted = extract_drawing_subject_advanced(user_text, text_response)
                     if extracted:
-                        print(f"[DEBUG] [HEURISTIC] Extracted drawing prompt '{extracted}' from user transcript '{user_text}'")
+                        print(f"[DEBUG] [HEURISTIC] Extracted drawing prompt '{extracted}' from transcript/reply.")
                         drawing_prompt = extracted
+                        
+                # 3.5 If requires_drawing is True but drawing_prompt is still empty, use fallback
+                if requires_drawing and not drawing_prompt.strip():
+                    interests = psych_metrics.get("key_interests", [])
+                    if interests:
+                        drawing_prompt = f"可爱的{interests[0]}"
+                        print(f"[DEBUG] [HEURISTIC] No prompt extracted, using fallback from interest: '{drawing_prompt}'")
+                    else:
+                        drawing_prompt = "可爱的小兔子"
+                        print(f"[DEBUG] [HEURISTIC] No prompt extracted, using default fallback: '{drawing_prompt}'")
                 
                 print(f"[DEBUG] [DOUBAO] Unified pipeline success. Transcript: '{user_text}', Reply: '{text_response}', Drawing: {requires_drawing} ({drawing_prompt})")
                 
@@ -550,6 +616,75 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                 except Exception as e:
                     print(f"[ERROR] [CORE] Error generating drawing from voice: {e}")
                     text_response = "抱歉，画画的时候出错了。"
+                    
+        # Backup heuristic for DeepSeek pipeline when no drawing was generated via tool calls
+        if not action:
+            user_text_lower = user_text.lower() if user_text else ""
+            text_response_lower = text_response.lower() if text_response else ""
+            drawing_keywords = ["画画", "画一个", "画只", "画张", "画条", "画一幅", "画一画", "想要画", "帮我画", "可以画", "画个", "画出", "画一画", "画"]
+            assistant_drawing_triggers = ["我们一起来画", "我为你画", "我画了", "为你画了", "开始画", "画一个", "画个", "画一只", "画一幅", "画画", "画张", "画条"]
+            
+            should_draw = False
+            if user_text_lower and any(kw in user_text_lower for kw in drawing_keywords):
+                should_draw = True
+            elif text_response_lower and any(trig in text_response_lower for trig in assistant_drawing_triggers):
+                should_draw = True
+                
+            if should_draw:
+                prompt = extract_drawing_subject_advanced(user_text, text_response)
+                if not prompt or prompt.strip() == "":
+                    prompt = "可爱的小兔子"
+                
+                print(f"[DEBUG] [CORE] Backup drawing triggered for prompt: '{prompt}'")
+                try:
+                    replicate_api = ReplicateAPI()
+                    print(f"[DEBUG] [CORE] Translating logic to English...")
+                    english_prompt = replicate_api.generate_text(f"Translate the following text into English. Output ONLY the English translation, no other text. Text: {prompt}")
+                    print(f"[DEBUG] [CORE] English Prompt: '{english_prompt}'")
+                    
+                    result = generate_image_with_fallback(english_prompt)
+                    image_urls = result["urls"]
+                    
+                    if image_urls:
+                        print(f"[DEBUG] [CORE] Image generated, processing for line art...")
+                        processed_image = process_line_art_image(image_urls[0])
+                        bitmap_hex = get_raw_bitmap_hex(image_urls[0])
+                        
+                        job_id = str(uuid.uuid4())
+                        job_data = {
+                            "job_id": job_id,
+                            "image_url": processed_image,
+                            "bitmap_hex": bitmap_hex,
+                            "prompt": prompt,
+                            "timestamp": time.time()
+                        }
+                        save_print_job_to_db(job_data)
+                        
+                        action = {"type": "print", "prompt": prompt, "job_id": job_id, "image_url": processed_image, "bitmap_hex": bitmap_hex}
+                        print(f"[DEBUG] [CORE] Drawing job created via backup: {job_id}")
+                        
+                        generation_id = str(uuid.uuid4())
+                        history_entry = {
+                            "generation_id": generation_id,
+                            "prompt": prompt,
+                            "english_prompt": english_prompt,
+                            "engine": "voice/chat",
+                            "protagonist": None,
+                            "title": f"🎨 {prompt}",
+                            "aspect_ratio": "1:1",
+                            "num_images": 1,
+                            "style": "default",
+                            "apply_line_art": True,
+                            "image_urls": [processed_image],
+                            "raw_bitmaps": [bitmap_hex],
+                            "timestamp": time.time()
+                        }
+                        save_history_to_db(history_entry)
+                        
+                        if not text_response or text_response == "我没听清，请再说一遍。":
+                            text_response = f"好的，我这就画一张{prompt}。"
+                except Exception as e:
+                    print(f"[ERROR] [CORE] Backup drawing generation failed: {e}")
                     
         if not text_response:
             text_response = "我没听清，请再说一遍。"
