@@ -139,6 +139,75 @@ def record_audio_dynamic(filename="voice_input.wav", fs=16000):
     write_wav(filename, fs, audio_np)
     return filename
 
+def record_audio_auto_vad(filename="voice_input.wav", fs=16000, silence_timeout=1.5, threshold=600):
+    """
+    Continuous Voice Activity Detection (Auto-VAD) recording.
+    Listens to the microphone continuously. Automatically starts recording when
+    user speaks, and automatically stops and saves when user stays silent for silence_timeout.
+    """
+    if not HAS_AUDIO_INPUT:
+        print("Microphone recording not available. Please install 'sounddevice' and 'numpy'.")
+        return None
+
+    import queue
+    q = queue.Queue()
+    
+    # States
+    # 0 = waiting for speech, 1 = speaking/recording
+    state = {"status": 0, "last_active": time.time(), "speech_started": False, "chunks": []}
+    
+    def callback(indata, frames, time_info, status):
+        if status:
+            print(status, file=sys.stderr)
+            
+        # Calculate peak amplitude
+        amp = np.max(np.abs(indata))
+        now = time.time()
+        
+        if state["status"] == 0:
+            # Waiting for speech
+            if amp > threshold:
+                state["status"] = 1
+                state["last_active"] = now
+                state["speech_started"] = True
+                print("\n🎙️ [检测到声音] 小探宝正在听你倾诉... 🗣️")
+                state["chunks"].append(indata.copy())
+        elif state["status"] == 1:
+            # Recording speech
+            state["chunks"].append(indata.copy())
+            if amp > threshold:
+                state["last_active"] = now
+            else:
+                # Silence detected in this chunk. Check if timeout reached
+                if now - state["last_active"] > silence_timeout:
+                    state["status"] = 2 # Finished
+                    print("🤫 [检测到静音] 正在发送给小探宝进行分析...\n")
+                    raise sd.CallbackStop()
+
+    print("\n🎧 [全自动免提通话模式] 小探宝正在静静地听... 请直接说话 (按 Ctrl+C 可退出)...")
+    
+    try:
+        # Create input stream with a small blocksize for real-time responsiveness
+        stream = sd.InputStream(samplerate=fs, channels=1, dtype='int16', callback=callback, blocksize=2048)
+        with stream:
+            while state["status"] < 2:
+                time.sleep(0.1)
+    except sd.CallbackStop:
+        pass
+    except KeyboardInterrupt:
+        print("\n[退出全自动录音]")
+        raise
+    except Exception as e:
+        print(f"Auto-VAD Recording error: {e}")
+        return None
+        
+    if not state["speech_started"] or not state["chunks"]:
+        return None
+        
+    audio_np = np.concatenate(state["chunks"], axis=0)
+    write_wav(filename, fs, audio_np)
+    return filename
+
 # -----------------------------------------------------------------------------
 # Configuration & Dynamic Overrides
 # -----------------------------------------------------------------------------
@@ -217,11 +286,19 @@ def play_audio(filepath):
     if sys.platform == "win32":
         try:
             import subprocess
-            cmd = ["powershell", "-c", f"(New-Object Media.SoundPlayer '{filepath}').PlaySync()"]
+            # Use COM object to support both WAV and MP3 natively
+            abs_path = os.path.abspath(filepath)
+            cmd = ["powershell", "-c", f"$m = New-Object -ComObject WMPlayer.OCX; $m.URL = '{abs_path}'; while($m.playState -ne 1) {{ Start-Sleep -m 100 }}"]
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
         except:
-            pass
+            # Fallback to SoundPlayer
+            try:
+                cmd = ["powershell", "-c", f"(New-Object Media.SoundPlayer '{filepath}').PlaySync()"]
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+            except:
+                pass
             
     # 2. Play on macOS via afplay
     if sys.platform == "darwin":
@@ -417,6 +494,11 @@ def send_chat_command(text, silent=False):
             if audio_b64:
                 save_audio(audio_b64, "chat_response.mp3")
                 play_audio("response_chat_response.mp3")
+            else:
+                text_response = data.get('text_response')
+                if text_response and not silent:
+                    if fetch_fallback_tts(text_response, "response_chat_response.mp3"):
+                        play_audio("response_chat_response.mp3")
                 
             action = data.get('action')
             if action:
@@ -460,6 +542,27 @@ def save_audio(b64_data, original_filename):
     except Exception as e:
         log(f"Failed to save audio: {e}", "ERROR")
 
+def fetch_fallback_tts(text, filename):
+    """
+    Fetches high-quality TTS from Google Translate public API when server-side TTS fails/is unavailable.
+    """
+    try:
+        import urllib.parse
+        quoted_text = urllib.parse.quote(text)
+        url = f"https://translate.google.com/translate_tts?ie=UTF-8&tl=zh-CN&client=tw-ob&q={quoted_text}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        log(f"正在从备用通道合成探奇老师的语音...", "DEBUG")
+        res = session.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            with open(filename, "wb") as f:
+                f.write(res.content)
+            return True
+    except Exception as e:
+        log(f"备用语音生成失败: {e}", "WARNING")
+    return False
+
 def send_voice_file(filepath, silent=False):
     """
     Sends an audio file to the voice endpoint and plays back the reply.
@@ -501,6 +604,16 @@ def send_voice_file(filepath, silent=False):
                 base_name = os.path.basename(filepath)
                 save_audio(audio_b64, base_name)
                 play_audio("response_" + base_name)
+            else:
+                text_response = data.get('text_response')
+                if text_response and not silent:
+                    import os
+                    base_name = os.path.basename(filepath)
+                    filename = "response_" + base_name
+                    if not filename.endswith(".mp3") and not filename.endswith(".wav"):
+                        filename += ".mp3"
+                    if fetch_fallback_tts(text_response, filename):
+                        play_audio(filename)
                 
             res.close()
             return data
@@ -540,10 +653,21 @@ def start_realtime_call_service():
         print("无法连接到服务器。请检查网络或服务器地址。退出中...")
         return
     
+    # Select dialogue mode
+    dialog_mode = "1" # Default to Auto-VAD
     if HAS_AUDIO_INPUT:
-        print("[状态] 🎤 麦克风硬件就绪！我们将默认采用【语音对话】通话模式。")
+        print("\n请选择通话交互模式：")
+        print(" [1] 🎤 全自动免提通话 (推荐：说停即发，完全实时语音对话，不需触碰键盘)")
+        print(" [2] ⌨️ 手动按键语音通话 (手动按回车键开始/结束录音)")
+        print(" [3] 💬 纯打字文本通话 (打字输入，语音合成外放)")
+        dialog_mode = safe_input("请选择 (默认1): ").strip()
+        if dialog_mode not in ["1", "2", "3", ""]:
+            dialog_mode = "1"
+        if dialog_mode == "":
+            dialog_mode = "1"
     else:
         print("[状态] ⚠️ 未检测到麦克风库。我们将默认采用【文本输入 + 语音合成外放】通话模式。")
+        dialog_mode = "3"
         
     print("正在连接并问候探奇老师...")
     # Initial greeting via silent text command
@@ -551,25 +675,22 @@ def start_realtime_call_service():
     
     try:
         while True:
-            if HAS_AUDIO_INPUT:
-                print("\n选择交互方式：[1] 🎤 语音对话 | [2] ⌨️ 文本对话 | 输入 'exit' 挂断电话")
-                choice = safe_input("请选择 (默认1): ").strip()
-                if choice.lower() == 'exit':
-                    break
-                
-                if choice == "2":
-                    text = safe_input("\n你（打字）: ").strip()
-                    if text.lower() == 'exit':
-                        break
-                    if text:
-                        send_chat_command(text)
+            if dialog_mode == "1":
+                # Continuous Auto-VAD call mode
+                filename = record_audio_auto_vad()
+                if filename:
+                    send_voice_file(filename)
                 else:
-                    # Dynamic voice recorder
-                    filename = record_audio_dynamic()
-                    if filename:
-                        send_voice_file(filename)
+                    # Brief break if user stays completely silent
+                    time.sleep(0.5)
+            elif dialog_mode == "2":
+                # Manual press to talk mode
+                filename = record_audio_dynamic()
+                if filename:
+                    send_voice_file(filename)
             else:
-                text = safe_input("\n你（输入）: ").strip()
+                # Text dialog mode
+                text = safe_input("\n你（打字）: ").strip()
                 if text.lower() == 'exit':
                     break
                 if text:
