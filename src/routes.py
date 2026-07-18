@@ -20,7 +20,9 @@ from src.services import (
     DeepSeekAPI, DoubaoAPI, ReplicateAPI, IdeogramAPI, generate_image_with_fallback,
     CACHE_FILE, STT_CACHE_FILE, TTS_CACHE_FILE
 )
+from src.logger import setup_logger
 
+logger = setup_logger("routes")
 router = APIRouter()
 
 class GenerateRequest(BaseModel):
@@ -625,42 +627,46 @@ async def get_history(limit: int = 50):
 async def handle_chat(req: ChatRequest, request: Request):
     token = request.headers.get("x-device-token")
     ua = request.headers.get("user-agent")
-    print(f"[DEBUG] [CONN] Incoming chat request from UA: {ua}, Token: {token[:5] if token else 'None'}***")
+    logger.debug(f"[CONN] Incoming chat request from UA: {ua}, Token: {token[:5] if token else 'None'}***")
     if not token:
-        print("[WARNING] [CONN] Unauthorized chat attempt: missing x-device-token")
+        logger.warning("[CONN] Unauthorized chat attempt: missing x-device-token")
         raise HTTPException(status_code=401, detail="Unauthorized")
         
-    print(f"[DEBUG] [CHAT] Text length: {len(req.text)} chars")
+    logger.debug(f"[CHAT] Text length: {len(req.text)} chars")
     if not DEEPSEEK_API_KEY:
-        print("[ERROR] [CHAT] Internal Server Error: API key missing")
+        logger.error("[CHAT] Internal Server Error: API key missing")
         raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY or API_KEY is missing")
         
     res = await process_llm_interaction(req.text, DEEPSEEK_API_KEY, device_token=token)
-    print(f"[DEBUG] [CHAT] Response generated: {res.get('text_response')[:50]}...")
+    logger.debug(f"[CHAT] Response generated: {res.get('text_response')[:50]}...")
     return res
 
 @router.post("/api/device/v1/voice")
 async def handle_voice(request: Request):
     token = request.headers.get("x-device-token")
     ua = request.headers.get("user-agent")
-    print(f"[DEBUG] [CONN] Incoming voice request from UA: {ua}, Token: {token[:5] if token else 'None'}***")
+    logger.debug(f"[CONN] Incoming voice request from UA: {ua}, Token: {token[:5] if token else 'None'}***")
     if not token:
-        print("[WARNING] [CONN] Unauthorized voice attempt: missing x-device-token")
+        logger.warning("[CONN] Unauthorized voice attempt: missing x-device-token")
         raise HTTPException(status_code=401, detail="Unauthorized")
         
     body = await request.body()
     if not body:
-        print("[WARNING] [VOICE] Bad Request: empty body")
+        logger.warning("[VOICE] Bad Request: empty body")
         raise HTTPException(status_code=400, detail="Empty audio body received")
     
-    print(f"[DEBUG] [VOICE] Audio binary size: {len(body)} bytes")
+    logger.debug(f"[VOICE] Audio binary size: {len(body)} bytes")
     if not DEEPSEEK_API_KEY:
-        print("[ERROR] [VOICE] Internal Server Error: API key missing")
+        logger.error("[VOICE] Internal Server Error: API key missing")
         raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY or API_KEY is missing")
         
-    res = await process_llm_interaction(body, DEEPSEEK_API_KEY, device_token=token)
-    print(f"[DEBUG] [VOICE] Response generated: {res.get('text_response')[:50]}...")
-    return res
+    try:
+        res = await process_llm_interaction(body, DEEPSEEK_API_KEY, device_token=token)
+        logger.debug(f"[VOICE] Response generated: {res.get('text_response')[:50]}...")
+        return res
+    except Exception as e:
+        logger.error(f"[VOICE] Server Error during processing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/device/v1/print-jobs")
 async def get_print_jobs(request: Request):

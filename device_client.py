@@ -1,5 +1,22 @@
 import os
 import sys
+import logging
+
+# -----------------------------------------------------------------------------
+# Logging Setup
+# -----------------------------------------------------------------------------
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger("device_client")
+
+def log(msg, level="INFO"):
+    if level == "DEBUG":
+        logger.debug(msg)
+    elif level == "WARNING":
+        logger.warning(msg)
+    elif level == "ERROR":
+        logger.error(msg)
+    else:
+        logger.info(msg)
 
 # -----------------------------------------------------------------------------
 # MicroPython Compatibility Shim
@@ -11,7 +28,7 @@ try:
     import ustruct as struct
     import ubinascii as binascii
     import machine
-    print("Running in MicroPython mode")
+    log("Running in MicroPython mode")
     IS_MICROPYTHON = True
 except ImportError:
     import requests
@@ -19,7 +36,7 @@ except ImportError:
     import time
     import struct
     import binascii
-    print("Running in Standard Python mode")
+    log("Running in Standard Python mode")
     IS_MICROPYTHON = False
 
 # -----------------------------------------------------------------------------
@@ -328,7 +345,13 @@ def send_chat_command(text, silent=False):
     try:
         res = requests.post(url, json={"text": text}, headers=headers)
         if res.status_code == 200:
-            data = res.json()
+            try:
+                data = res.json()
+            except Exception as e:
+                log(f"Failed to parse JSON response: {res.text[:200]}", "ERROR")
+                res.close()
+                return None
+
             if not silent:
                 log("--- Chat Response ---")
                 log(f"探奇老师: {data.get('text_response')}")
@@ -394,7 +417,13 @@ def send_voice_file(filepath, silent=False):
         res = requests.post(url, data=audio_data, headers=headers)
         
         if res.status_code == 200:
-            data = res.json()
+            try:
+                data = res.json()
+            except Exception as e:
+                log(f"Failed to parse JSON response: {res.text[:200]}", "ERROR")
+                res.close()
+                return None
+
             if not silent:
                 log("--- Voice Response ---")
                 log(f"探奇老师: {data.get('text_response')}")
