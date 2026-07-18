@@ -218,12 +218,32 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                         }
                     }
                 else:
-                    print(f"[DEBUG] [FAST_PATH] Querying text-to-JSON model...")
-                    llm_start = time.time()
-                    res_data = doubao.unified_text_chat(user_text)
-                    print(f"[DEBUG] [FAST_PATH] Text-to-JSON took {time.time() - llm_start:.2f}s")
+                    res_data = None
+                    if deepseek.client:
+                        try:
+                            print(f"[DEBUG] [FAST_PATH] Querying DeepSeek text-to-JSON model...")
+                            llm_start = time.time()
+                            res_data = deepseek.unified_text_chat(user_text)
+                            print(f"[DEBUG] [FAST_PATH] DeepSeek Text-to-JSON took {time.time() - llm_start:.2f}s")
+                        except Exception as ds_err:
+                            print(f"[WARNING] [FAST_PATH] DeepSeek text-to-JSON failed: {ds_err}, trying Doubao...")
+                    
+                    if not res_data:
+                        print(f"[DEBUG] [FAST_PATH] Querying Doubao text-to-JSON model...")
+                        llm_start = time.time()
+                        res_data = doubao.unified_text_chat(user_text)
+                        print(f"[DEBUG] [FAST_PATH] Doubao Text-to-JSON took {time.time() - llm_start:.2f}s")
             else:
-                res_data = doubao.unified_text_chat(prompt_input)
+                res_data = None
+                if deepseek.client:
+                    try:
+                        print(f"[DEBUG] [FAST_PATH] Querying DeepSeek text-to-JSON model (text input)...")
+                        res_data = deepseek.unified_text_chat(prompt_input)
+                    except Exception as ds_err:
+                        print(f"[WARNING] [CORE] DeepSeek text chat failed: {ds_err}")
+                if not res_data:
+                    print(f"[DEBUG] [FAST_PATH] Querying Doubao text-to-JSON model (text input)...")
+                    res_data = doubao.unified_text_chat(prompt_input)
                 
             if res_data:
                 user_text = res_data.get("user_transcript", "")

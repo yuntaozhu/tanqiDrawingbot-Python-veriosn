@@ -95,6 +95,55 @@ class DeepSeekAPI:
             raise RuntimeError(f"DeepSeek API Error: {e}")
 
     @retry_with_backoff(max_retries=2)
+    def unified_text_chat(self, text_prompt: str) -> Optional[Dict[str, Any]]:
+        if not self.client:
+            raise ValueError("DEEPSEEK_API_KEY is not set.")
+            
+        system_instruction = """你是一位极其温柔、懂得儿童心理学的幼儿园特级教师，名字叫'小探宝'。
+你的任务是与小朋友进行顺畅好玩的互动聊天。在输出中严格返回一个 JSON 对象，结构如下：
+{
+  "user_transcript": "（在这里原样填写小朋友的对话输入）",
+  "assistant_reply": "（在这里填写你作为温柔的探奇老师对小朋友的回答，保持简短、充满童趣，控制在 3-5 句话内）",
+  "requires_drawing": true/false（布尔值，判断小朋友是否有画画的需求，比如提到“画一个...”、“想要一个画”等）,
+  "drawing_prompt": "（如果requires_drawing为true，在此处提取出小朋友想要画画的具体主题，如'小猫'、'红色的赛车'，否则填空字符串）",
+  "psych_metrics": {
+    "detected_emotions": ["（识别出小朋友说话时的主要情绪，如：快乐、同理心、悲伤、焦虑、好奇、愤怒等，可以填1-2个）"],
+    "linguistic_richness_score": （小数值，范围0.0~1.0，根据小朋友话语的句子完整度和词汇丰富度进行打分）,
+    "cognitive_milestone_ref": "（根据小朋友表达的特征，标注其当前的心理与认知发展特征，如：感知运动阶段、前运算符号思维、同理心萌芽等）",
+    "attention_span_seconds": 15（估算的小朋友专注时长，默认15即可）,
+    "key_interests": ["（提取小朋友话语中的核心关切或兴趣，如：小动物、天气、玩具、大自然等，可填1-2个）"],
+    "requires_attention": false（布尔值，若识别到极度消极、焦虑、恐惧、分离焦虑或明显异常心理，则填true，否则为false）
+  }
+}
+请确保你的回复必须是合法的 JSON 对象。"""
+
+        try:
+            print(f"[DEBUG] [DEEPSEEK_TEXT] Sending chat to deepseek-chat...")
+            response = self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": text_prompt}
+                ],
+                response_format={"type": "json_object"},
+                timeout=12
+            )
+            content = response.choices[0].message.content
+            print(f"[DEBUG] [DEEPSEEK_TEXT] Raw response: '{content}'")
+            
+            content_clean = content.strip()
+            if content_clean.startswith("```"):
+                lines = content_clean.split("\n")
+                if lines[0].startswith("```json") or lines[0].startswith("```"):
+                    content_clean = "\n".join(lines[1:-1])
+            
+            parsed_data = json.loads(content_clean)
+            return parsed_data
+        except Exception as e:
+            print(f"[ERROR] [DEEPSEEK_TEXT] Error in unified text chat: {e}")
+            raise e
+
+    @retry_with_backoff(max_retries=2)
     def transcribe_audio(self, audio_bytes: bytes) -> str:
         """Transcribe audio with fallback support for multiple providers."""
         global STT_CACHE
@@ -232,7 +281,15 @@ class DeepSeekAPI:
         print(f"[DEBUG] [TTS] Generating speech for: '{text[:50]}...'")
         providers = []
         
-        # 1. Doubao Voice Design (User requested "使用Doubao-音色设计")
+        # 1. Primary TTS from Env (e.g. SiliconFlow, which is extremely fast and natural)
+        if TTS_API_KEY:
+             providers.append({"name": "Primary (Env)", "key": TTS_API_KEY, "url": TTS_BASE_URL})
+             
+        # 2. SiliconFlow Fallback
+        if SILICONFLOW_API_KEY:
+            providers.append({"name": "SiliconFlow", "key": SILICONFLOW_API_KEY, "url": "https://api.siliconflow.cn/v1"})
+            
+        # 3. Doubao Voice Design (Fallback, since dynamic voice design compilation takes 10s+)
         if ARK_API_KEY:
              providers.append({
                  "name": "Doubao-VoiceDesign",
@@ -240,15 +297,7 @@ class DeepSeekAPI:
                  "url": "https://ark.cn-beijing.volces.com/api/v3",
                  "model": ARK_TTS_MODEL
              })
-        
-        # 2. Primary TTS from Env
-        if TTS_API_KEY:
-             providers.append({"name": "Primary (Env)", "key": TTS_API_KEY, "url": TTS_BASE_URL})
              
-        # 3. SiliconFlow Fallback
-        if SILICONFLOW_API_KEY:
-            providers.append({"name": "SiliconFlow", "key": SILICONFLOW_API_KEY, "url": "https://api.siliconflow.cn/v1"})
-            
         # 4. OpenAI Fallback
         if OPENAI_API_KEY:
             providers.append({"name": "OpenAI", "key": OPENAI_API_KEY, "url": "https://api.openai.com/v1"})
@@ -274,7 +323,7 @@ class DeepSeekAPI:
                     voice_name = "一个极其温柔、友好、可爱的5岁小朋友，用稚嫩温和的语气说话"
                 elif "siliconflow.cn" in provider.get("url", "").lower():
                     model_name = "FunAudioLLM/CosyVoice2-0.5B"
-                    voice_name = "fc_female"
+                    voice_name = "longwanwan"  # Highly natural human female voice, warm & gentle
                     
                 response = client.audio.speech.create(
                     model=model_name,
