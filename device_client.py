@@ -297,7 +297,7 @@ def check_print_jobs():
     headers = get_headers()
     
     try:
-        res = requests.get(url, headers=headers)
+        res = requests.get(url, headers=headers, allow_redirects=False)
         if res.status_code == 200:
             job = res.json()
             res.close()
@@ -305,6 +305,10 @@ def check_print_jobs():
                 log(f">>> NEW PRINT JOB RECEIVED: {job.get('job_id')}")
                 log(f"    Prompt: {job.get('prompt')}", "DEBUG")
                 return job
+            return None
+        elif res.status_code in [301, 302, 303, 307]:
+            log(f"Redirected to: {res.headers.get('Location')}. Check if authentication is needed.", "ERROR")
+            res.close()
             return None
         elif res.status_code >= 500:
             res.close()
@@ -343,7 +347,7 @@ def send_chat_command(text, silent=False):
     headers = get_headers()
     
     try:
-        res = requests.post(url, json={"text": text}, headers=headers)
+        res = requests.post(url, json={"text": text}, headers=headers, allow_redirects=False)
         if res.status_code == 200:
             try:
                 data = res.json()
@@ -370,6 +374,10 @@ def send_chat_command(text, silent=False):
                     save_image(image_url, action.get('job_id'))
             res.close()
             return data
+        elif res.status_code in [301, 302, 303, 307]:
+            log(f"Redirected to: {res.headers.get('Location')}. Check if authentication is needed.", "ERROR")
+            res.close()
+            return None
         else:
             log(f"Error {res.status_code} in Chat: {res.text}", "ERROR")
             res.close()
@@ -414,7 +422,7 @@ def send_voice_file(filepath, silent=False):
             log(f"Sending audio file: {filepath} ({len(audio_data)} bytes)", "DEBUG")
         
         headers = get_headers('audio/wav')
-        res = requests.post(url, data=audio_data, headers=headers)
+        res = requests.post(url, data=audio_data, headers=headers, allow_redirects=False)
         
         if res.status_code == 200:
             try:
@@ -444,6 +452,10 @@ def send_voice_file(filepath, silent=False):
                 
             res.close()
             return data
+        elif res.status_code in [301, 302, 303, 307]:
+            log(f"Redirected to: {res.headers.get('Location')}. Check if authentication is needed.", "ERROR")
+            res.close()
+            return None
         else:
             log(f"Error {res.status_code} in Voice Response: {res.text}", "ERROR")
             res.close()
