@@ -1,4 +1,4 @@
-
+import os
 import sys
 
 # -----------------------------------------------------------------------------
@@ -41,9 +41,8 @@ def record_audio(filename="voice_input.wav", duration=5, fs=16000):
         
     print(f"Recording for {duration} seconds... Speak now!")
     try:
-        import sounddevice as sd_internal
-        recording = sd_internal.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
-        sd_internal.wait()  # Wait until recording is finished
+        recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
+        sd.wait()  # Wait until recording is finished
         write_wav(filename, fs, recording)
         print(f"Saved recording to {filename}")
         return filename
@@ -51,13 +50,67 @@ def record_audio(filename="voice_input.wav", duration=5, fs=16000):
         print(f"Recording failed: {e}")
         return None
 
+def record_audio_dynamic(filename="voice_input.wav", fs=16000):
+    """
+    Records audio using a queue until the user presses Enter to stop.
+    This provides a natural, comfortable conversational experience.
+    """
+    if not HAS_AUDIO_INPUT:
+        print("Microphone recording not available. Please install 'sounddevice' and 'numpy'.")
+        return None
+        
+    import queue
+    q = queue.Queue()
+    
+    def callback(indata, frames, time_info, status):
+        if status:
+            print(status, file=sys.stderr)
+        q.put(indata.copy())
+        
+    print("\n[实时通话] 按回车键【Enter】开始说话...")
+    safe_input()
+    
+    print("▶ 【正在录音】 探奇正在听... 说完后请按回车键【Enter】发送给探奇 ◀")
+    
+    try:
+        # Start recording stream
+        stream = sd.InputStream(samplerate=fs, channels=1, dtype='int16', callback=callback)
+        with stream:
+            safe_input()  # Block until the user presses Enter again
+    except Exception as e:
+        print(f"Recording stream error: {e}")
+        return None
+        
+    print("■ 录音结束，正在发送给探奇老师进行分析...")
+    
+    # Gather all audio chunks from queue
+    audio_chunks = []
+    while not q.empty():
+        audio_chunks.append(q.get())
+        
+    if not audio_chunks:
+        print("No audio detected.")
+        return None
+        
+    audio_np = np.concatenate(audio_chunks, axis=0)
+    write_wav(filename, fs, audio_np)
+    return filename
+
 # -----------------------------------------------------------------------------
-# Configuration
+# Configuration & Dynamic Overrides
 # -----------------------------------------------------------------------------
-# IMPORTANT: Update this BASE_URL to your current AI Studio preview/deployment URL
-BASE_URL = 'https://tanqibot.up.railway.app' 
-DEVICE_TOKEN = 'test-token-123'
+# Default to localhost if running inside AI Studio development environment, otherwise fallback to live URL
+DEFAULT_BASE_URL = os.getenv("BASE_URL", "http://localhost:3000")
+DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "test-token-123")
 POLL_INTERVAL = 2.0  # Seconds
+
+# Parse potential command line arguments for quick overrides
+# Usage: python device_client.py [BASE_URL] [DEVICE_TOKEN]
+BASE_URL = DEFAULT_BASE_URL
+if len(sys.argv) > 1:
+    BASE_URL = sys.argv[1]
+if len(sys.argv) > 2:
+    DEVICE_TOKEN = sys.argv[2]
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -102,6 +155,75 @@ def log(msg, level="INFO"):
     ts = "{:02d}:{:02d}:{:02d}".format(t[3], t[4], t[5])
     print(f"[{ts}] [{level}] {msg}")
 
+def play_audio(filepath):
+    """
+    Robust, cross-platform audio playback module.
+    Attempts to play MP3 or WAV audio using common command-line utility fallbacks.
+    """
+    if IS_MICROPYTHON:
+         log("Audio playback not natively supported on raw MicroPython core without hardware DAC.", "WARNING")
+         return False
+         
+    if not os.path.exists(filepath):
+        log(f"Audio file not found: {filepath}", "ERROR")
+        return False
+        
+    log(f"播放探奇老师语音中 ({os.path.basename(filepath)})...", "DEBUG")
+    
+    # 1. Play on Windows via PowerShell
+    if sys.platform == "win32":
+        try:
+            import subprocess
+            cmd = ["powershell", "-c", f"(New-Object Media.SoundPlayer '{filepath}').PlaySync()"]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except:
+            pass
+            
+    # 2. Play on macOS via afplay
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+            subprocess.run(["afplay", filepath], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except:
+            pass
+            
+    # 3. Generic Linux / Unix command-line utility fallbacks
+    players = ['ffplay', 'mpg123', 'mpv', 'aplay', 'paplay']
+    for player in players:
+        try:
+            import subprocess
+            if player == 'ffplay':
+                cmd = [player, '-nodisp', '-autoexit', '-loglevel', 'quiet', filepath]
+            elif player == 'aplay':
+                if not filepath.endswith('.wav'):
+                    continue
+                cmd = [player, '-q', filepath]
+            else:
+                cmd = [player, filepath]
+                
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return True
+        except (subprocess.SubprocessError, FileNotFoundError):
+            continue
+            
+    # 4. Try using standard python libraries if installed
+    try:
+        import sounddevice as sd
+        import soundfile as sf
+        data, fs = sf.read(filepath)
+        sd.play(data, fs)
+        sd.wait()
+        return True
+    except ImportError:
+        pass
+    except Exception as e:
+        log(f"Standard library sound playback failed: {e}", "DEBUG")
+        
+    log(f"语音响应已保存至: {filepath} (未检测到系统扬声器/播放工具，请直接在本地播放该文件)", "WARNING")
+    return False
+
 # -----------------------------------------------------------------------------
 # API Interactions
 # -----------------------------------------------------------------------------
@@ -110,21 +232,19 @@ def get_headers(content_type='application/json'):
     return {
         'x-device-token': DEVICE_TOKEN,
         'Content-Type': content_type,
-        'User-Agent': 'SuperEgoDevice/1.0'
+        'User-Agent': 'SuperEgoDevice/1.1'
     }
 
 def send_voice_command():
     """
-    Sends audio to the voice endpoint.
+    Sends a brief dummy voice chunk to verify endpoint connectivity.
     """
     url = f"{BASE_URL}/api/device/v1/voice"
-    
     log("Recording audio (simulated)...", "DEBUG")
     audio_data = create_dummy_wav(1.0)
     
     headers = get_headers('audio/wav')
     log(f"POST {url}", "DEBUG")
-    log(f"Headers: {headers}", "DEBUG")
     log(f"Payload Size: {len(audio_data)} bytes", "DEBUG")
     
     start_time = time.time()
@@ -141,7 +261,6 @@ def send_voice_command():
             audio_b64 = data.get('audio_base64')
             if audio_b64:
                 log(f"Received Audio: {len(audio_b64)} characters (base64)", "DEBUG")
-                # Try to save the response audio for verification
                 save_audio(audio_b64, "voice_response.mp3")
             res.close()
             return data
@@ -155,13 +274,10 @@ def send_voice_command():
 
 def check_print_jobs():
     """
-    Polls for new print jobs.
+    Polls for new print jobs from the queue.
     """
     url = f"{BASE_URL}/api/device/v1/print-jobs"
     headers = get_headers()
-    
-    # Only log polling occasionally or with DEBUG to avoid spamming the console
-    # log(f"GET {url}", "DEBUG")
     
     try:
         res = requests.get(url, headers=headers)
@@ -171,15 +287,12 @@ def check_print_jobs():
             if job.get('has_job'):
                 log(f">>> NEW PRINT JOB RECEIVED: {job.get('job_id')}")
                 log(f"    Prompt: {job.get('prompt')}", "DEBUG")
-                log(f"    Image URL: {job.get('image_url')[:50]}...", "DEBUG")
                 return job
             return None
         elif res.status_code >= 500:
-            log(f"Server Error {res.status_code}. Retrying later...", "ERROR")
             res.close()
             return None
         else:
-            log(f"Poll Error {res.status_code}: {res.text[:100]}", "ERROR")
             res.close()
             return None
     except Exception as e:
@@ -188,7 +301,7 @@ def check_print_jobs():
 
 def complete_print_job(job_id):
     """
-    Marks a job as complete.
+    Marks a print job as successfully processed/completed.
     """
     url = f"{BASE_URL}/api/device/v1/print-jobs/{job_id}/complete"
     
@@ -202,37 +315,33 @@ def complete_print_job(job_id):
     except Exception as e:
         log(f"Exception completing job: {e}")
 
-def send_chat_command(text):
+def send_chat_command(text, silent=False):
     """
     Sends text to the chat endpoint.
     """
     url = f"{BASE_URL}/api/device/v1/chat"
     
-    log(f"Sending text: {text}", "DEBUG")
+    if not silent:
+        log(f"Sending text: {text}", "DEBUG")
     headers = get_headers()
-    log(f"POST {url}", "DEBUG")
-    log(f"Headers: {headers}", "DEBUG")
     
-    start_time = time.time()
     try:
         res = requests.post(url, json={"text": text}, headers=headers)
-        elapsed = time.time() - start_time
-        log(f"Response Status: {res.status_code} (took {elapsed:.2f}s)", "DEBUG")
-        
         if res.status_code == 200:
             data = res.json()
-            log("--- Chat Response ---")
-            log(f"Text Response: {data.get('text_response')}")
+            if not silent:
+                log("--- Chat Response ---")
+                log(f"探奇老师: {data.get('text_response')}")
             
-            # Check for audio in chat response too
+            # Save and play sound if returned
             audio_b64 = data.get('audio_base64')
             if audio_b64:
-                log(f"Received Audio: {len(audio_b64)} characters (base64)", "DEBUG")
                 save_audio(audio_b64, "chat_response.mp3")
+                play_audio("response_chat_response.mp3")
                 
             action = data.get('action')
             if action:
-                log(f"Action: {action.get('type')} - {action.get('prompt')}")
+                log(f"🎨 [绘画创作中] 探奇老师正在为你创作简笔画: {action.get('prompt')}")
                 image_url = action.get('image_url')
                 if image_url and image_url.startswith('data:image'):
                     save_image(image_url, action.get('job_id'))
@@ -253,7 +362,7 @@ def save_image(data_uri, job_id):
         filename = f"drawing_{job_id}.png"
         with open(filename, "wb") as f:
             f.write(data)
-        log(f"Saved image to {filename}")
+        log(f"绘画图片已下载并成功保存至: {filename}")
     except Exception as e:
         log(f"Failed to save image: {e}")
 
@@ -262,16 +371,15 @@ def save_audio(b64_data, original_filename):
         data = binascii.a2b_base64(b64_data)
         filename = "response_" + original_filename
         if not filename.endswith(".mp3") and not filename.endswith(".wav"):
-             filename += ".mp3" # SiliconFlow/OpenAI usually returns MP3 by default for speech
+             filename += ".mp3"
         with open(filename, "wb") as f:
             f.write(data)
-        log(f"Saved response audio to {filename}")
     except Exception as e:
         log(f"Failed to save audio: {e}", "ERROR")
 
-def send_voice_file(filepath):
+def send_voice_file(filepath, silent=False):
     """
-    Sends a WAV file to the voice endpoint.
+    Sends an audio file to the voice endpoint and plays back the reply.
     """
     url = f"{BASE_URL}/api/device/v1/voice"
     
@@ -279,42 +387,36 @@ def send_voice_file(filepath):
         with open(filepath, "rb") as f:
             audio_data = f.read()
             
-        log(f"File: {filepath} ({len(audio_data)} bytes)", "DEBUG")
-        if len(audio_data) < 44:
-             log("Warning: File too small to be a valid WAV", "WARNING")
-        else:
-             log(f"Header: {audio_data[:4]}...{audio_data[8:12]}", "DEBUG")
+        if not silent:
+            log(f"Sending audio file: {filepath} ({len(audio_data)} bytes)", "DEBUG")
         
         headers = get_headers('audio/wav')
-        log(f"POST {url}", "DEBUG")
-        log(f"Headers: {headers}", "DEBUG")
-        
         res = requests.post(url, data=audio_data, headers=headers)
-        log(f"Response Status: {res.status_code}", "DEBUG")
         
         if res.status_code == 200:
             data = res.json()
-            log("--- Voice Response ---")
-            log(f"Text Response: {data.get('text_response')}")
+            if not silent:
+                log("--- Voice Response ---")
+                log(f"探奇老师: {data.get('text_response')}")
+                
             action = data.get('action')
             if action:
-                log(f"Action Type: {action.get('type')}")
-                log(f"Action Prompt: {action.get('prompt')}")
+                log(f"🎨 [绘画创作中] 探奇老师触发了绘画简笔画: {action.get('prompt')}")
                 image_url = action.get('image_url')
                 if image_url and image_url.startswith('data:image'):
                     save_image(image_url, action.get('job_id'))
             
             audio_b64 = data.get('audio_base64')
             if audio_b64:
-                log(f"Received Audio: {len(audio_b64)} bytes", "DEBUG")
                 import os
                 base_name = os.path.basename(filepath)
                 save_audio(audio_b64, base_name)
+                play_audio("response_" + base_name)
                 
             res.close()
             return data
         else:
-            log(f"Error {res.status_code} in Voice: {res.text}", "ERROR")
+            log(f"Error {res.status_code} in Voice Response: {res.text}", "ERROR")
             res.close()
             return None
     except Exception as e:
@@ -322,17 +424,85 @@ def send_voice_file(filepath):
         return None
 
 # -----------------------------------------------------------------------------
-# Main Test Loop
+# Main Call / Dialogue Service
+# -----------------------------------------------------------------------------
+
+def start_realtime_call_service():
+    """
+    Starts a beautifully designed, conversational voice/text call service.
+    Acts as a continuous open microphone or typing session where the child or user can interact in real-time.
+    """
+    print("\n" + "="*50)
+    print("   🧸 探奇智能玩偶（小探宝） 实时通话服务已启动 🧸   ")
+    print("      在通话过程中，你可以直接对探奇倾诉或输入对话。")
+    print("      探奇会聆听你的诉求，用温柔的语音回答你。")
+    print("      如果你要画画（例如：“画一只可爱小兔子”），")
+    print("      探奇会自动为你生成1-bit黑白简笔画，推送到你的打印机！")
+    print("="*50)
+    print(f"当前在线设备令牌: {DEVICE_TOKEN}")
+    print(f"服务器端连接地址: {BASE_URL}")
+    print("-"*50)
+    
+    if HAS_AUDIO_INPUT:
+        print("[状态] 🎤 麦克风硬件就绪！我们将默认采用【语音对话】通话模式。")
+    else:
+        print("[状态] ⚠️ 未检测到麦克风库。我们将默认采用【文本输入 + 语音合成外放】通话模式。")
+        
+    print("正在连接并问候探奇老师...")
+    # Initial greeting via silent text command
+    send_chat_command("你好，我们开始聊天吧！", silent=True)
+    
+    try:
+        while True:
+            if HAS_AUDIO_INPUT:
+                print("\n选择交互方式：[1] 🎤 语音对话 | [2] ⌨️ 文本对话 | 输入 'exit' 挂断电话")
+                choice = safe_input("请选择 (默认1): ").strip()
+                if choice.lower() == 'exit':
+                    break
+                
+                if choice == "2":
+                    text = safe_input("\n你（打字）: ").strip()
+                    if text.lower() == 'exit':
+                        break
+                    if text:
+                        send_chat_command(text)
+                else:
+                    # Dynamic voice recorder
+                    filename = record_audio_dynamic()
+                    if filename:
+                        send_voice_file(filename)
+            else:
+                text = safe_input("\n你（输入）: ").strip()
+                if text.lower() == 'exit':
+                    break
+                if text:
+                    send_chat_command(text)
+                    
+            # Brief check for print jobs in background during dialog
+            job = check_print_jobs()
+            if job:
+                log(f">>> 🤖 打印机打印任务自动触发! 正在输出简笔画: '{job.get('prompt')}'")
+                image_url = job.get('image_url')
+                if image_url and image_url.startswith('data:image'):
+                     save_image(image_url, job.get('job_id'))
+                time.sleep(1.5)
+                complete_print_job(job['job_id'])
+                
+    except KeyboardInterrupt:
+        pass
+    
+    print("\n☎️ 实时通话已挂断。谢谢使用，再见！")
+
+# -----------------------------------------------------------------------------
+# Main Entry Point
 # -----------------------------------------------------------------------------
 
 def safe_input(prompt=""):
     """Safely handle input with potential encoding issues."""
     try:
-        # Standard input
         return input(prompt).strip()
     except UnicodeDecodeError:
         try:
-            # Fallback for some Windows/Linux envs
             import sys
             sys.stdout.write(prompt)
             sys.stdout.flush()
@@ -348,69 +518,44 @@ def safe_input(prompt=""):
 
 def main():
     log("=======================================")
-    log("   SuperEgo Device Client v1.1 (Safe Input)")
-    log(f"   Target: {BASE_URL}")
+    log("   SuperEgo Device Client v1.2 (Real-time Call)")
+    log(f"   Target URL: {BASE_URL}")
+    log(f"   Device Token: {DEVICE_TOKEN}")
     log("=======================================")
     
-    print("\nSelect Mode:")
-    print("1. Interactive Chat (Type commands)")
-    print("2. Automated Voice Test (Sends dummy audio)")
-    print("3. Send Voice File (WAV)")
-    print("4. Poll Only")
-    if HAS_AUDIO_INPUT:
-        print("5. Record from Microphone (5s)")
+    print("\n选择要运行的功能：")
+    print("1. 📞 启动 实时多模态通话服务 (Real-time Voice & Text Dialogue Loop)")
+    print("2. 💬 发送单次文本对话 (Single Chat Command)")
+    print("3. 🎤 录制并发送单次语音 (Microphone Voice Command)")
+    print("4. 🖨️ 打印队列后台消费轮询 (Poll & Print jobs loop)")
+    print("5. 🧪 模拟发送测试语音包 (Send dummy silent audio)")
     
-    mode = safe_input("Enter mode (1/2/3/4/5): ")
+    mode = safe_input("\n请输入选择 (1/2/3/4/5): ")
     
-    if mode == "1":
-        log("Entering Interactive Chat Mode. Type 'exit' to quit.")
-        while True:
-            text = safe_input("\nYou: ")
-            if text.lower() == 'exit':
-                break
-            if text:
-                send_chat_command(text)
-                
+    if mode == "1" or mode == "":
+        start_realtime_call_service()
+        
     elif mode == "2":
-        # 1. Test Voice
-        log("1. Testing Voice Interaction...")
-        send_voice_command()
-        
-        # 2. Start Polling
-        log(f"2. Starting Polling Loop (Interval: {POLL_INTERVAL}s)")
-        log("   Press Ctrl+C to stop.")
-        
-        try:
-            while True:
-                job = check_print_jobs()
-                
-                if job:
-                    log(f"Processing Image Job: {job.get('job_id')}")
-                    image_url = job.get('image_url')
-                    if image_url and image_url.startswith('data:image'):
-                         save_image(image_url, job.get('job_id'))
-                    
-                    log("Simulating print delay (3s)...")
-                    time.sleep(3)
-                    complete_print_job(job['job_id'])
-                
-                time.sleep(POLL_INTERVAL)
-                
-        except KeyboardInterrupt:
-            log("Test stopped by user.")
- 
+        text = safe_input("请输入发送给探奇的内容: ")
+        if text:
+            send_chat_command(text)
+            
     elif mode == "3":
-        filepath = safe_input("Enter path to WAV file: ")
-        if filepath:
-            send_voice_file(filepath)
-            
+        if not HAS_AUDIO_INPUT:
+             print("错误: 本机未检测到麦克风录音环境。请先安装 dependencies (sounddevice, numpy, scipy)。")
+        else:
+             filename = record_audio()
+             if filename:
+                 send_voice_file(filename)
+                 
     elif mode == "4":
-        log(f"Starting Polling Loop (Interval: {POLL_INTERVAL}s)")
+        log(f"正在启动打印机循环轮询消费队列... (间隔: {POLL_INTERVAL}s)")
+        log("按下 Ctrl+C 可停止。")
         try:
             while True:
                 job = check_print_jobs()
                 if job:
-                    log(f"Processing Image Job: {job.get('job_id')}")
+                    log(f"正在渲染并打印简笔画: {job.get('job_id')}")
                     image_url = job.get('image_url')
                     if image_url and image_url.startswith('data:image'):
                          save_image(image_url, job.get('job_id'))
@@ -418,17 +563,11 @@ def main():
                     complete_print_job(job['job_id'])
                 time.sleep(POLL_INTERVAL)
         except KeyboardInterrupt:
-            log("Stopped.")
+            log("轮询已停止。")
             
-    elif mode == "5" and HAS_AUDIO_INPUT:
-        while True:
-            filename = record_audio()
-            if filename:
-                send_voice_file(filename)
-            
-            cont = safe_input("Record again? (y/n): ").lower()
-            if cont != 'y':
-                break
+    elif mode == "5":
+        log("正在模拟发送单次无声测试语音包...")
+        send_voice_command()
 
 if __name__ == '__main__':
     main()

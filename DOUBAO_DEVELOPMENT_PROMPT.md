@@ -166,8 +166,8 @@
 
 ### 1. 密钥与环境管理 (Environment Variables)
 - 引入 `ARK_API_KEY`，对应值为 `"05a5b825-69f6-40ff-93e9-7493c05e4fb0"`。
-- 引入端到端模型配置项 `ARK_AUDIO_MODEL = "doubao-seed-2-0-lite-260428"`。
-- 引入最新绘画模型配置项 `ARK_DRAW_MODEL = "doubao-seedream-5-0-pro-260628"`。
+- 引入端到端模型配置项 `ARK_AUDIO_MODEL = "doubao-seed-2.0-lite-260428"`。
+- 引入最新绘画模型配置项 `ARK_DRAW_MODEL = "doubao-seedream-5.0-pro-260628"`。
 - 在原有 `.env.example` 中补充上述说明，在 `.env` 中初始化。
 
 ### 2. 豆包端到端音频通信集成 (`/api/device/v1/voice`)
@@ -178,7 +178,7 @@
   c. 传参时，在 system prompt 设定「专业少儿心理学家与探奇老师」的双重人格，让模型直接在回包中同步返回文字结果与情绪诊断标签。
 
 ### 3. 原生中文 Seedream 5.0 pro 简笔画创作
-- 在触发绘画决策（即原有的 `generate_drawing` 函数调用）时，由调用 Replicate 切换至调用 `doubao-seedream-5-0-pro-260628`。
+- 在触发绘画决策（即原有的 `generate_drawing` 函数调用）时，由调用 Replicate 切换至调用 `doubao-seedream-5.0-pro-260628`。
 - 传入原生中文 Prompt 组合装饰器，分辨率指定为 `"2K"`，且设置 `"optimize_prompt_options": {"mode": "fast"}` 以极速响应。
 - 接口回包后，将获取的 2K 高画质图像 URL 输送至原有图像重采样过滤器 (`apply_line_art_filter` 转换为 320x320 纯黑白 1-bit 压包) 写入打印数据库队列。
 

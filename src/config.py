@@ -33,5 +33,5 @@ if REPLICATE_API_TOKEN:
 IDEOGRAM_API_KEY = os.getenv("IDEOGRAM_API_KEY")
 
 ARK_API_KEY = os.getenv("ARK_API_KEY", "05a5b825-69f6-40ff-93e9-7493c05e4fb0")
-ARK_AUDIO_MODEL = os.getenv("ARK_AUDIO_MODEL", "doubao-seed-2-0-lite-260428")
-ARK_DRAW_MODEL = os.getenv("ARK_DRAW_MODEL", "doubao-seedream-5-0-pro-260628")
+ARK_AUDIO_MODEL = os.getenv("ARK_AUDIO_MODEL", "doubao-seed-2.0-lite-260428")
+ARK_DRAW_MODEL = os.getenv("ARK_DRAW_MODEL", "doubao-seedream-5.0-pro-260628")
