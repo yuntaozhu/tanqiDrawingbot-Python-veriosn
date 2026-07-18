@@ -57,6 +57,14 @@ STT_CACHE = load_cache(STT_CACHE_FILE)
 TTS_CACHE = load_cache(TTS_CACHE_FILE)
 
 class DeepSeekAPI:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
     def __init__(self):
         self.api_key = DEEPSEEK_API_KEY
         self.base_url = DEEPSEEK_BASE_URL
@@ -93,6 +101,55 @@ class DeepSeekAPI:
         except Exception as e:
             print(f"DeepSeek chat error: {e}")
             raise RuntimeError(f"DeepSeek API Error: {e}")
+
+    @retry_with_backoff(max_retries=2)
+    def unified_text_chat(self, text_prompt: str) -> Optional[Dict[str, Any]]:
+        if not self.client:
+            raise ValueError("DEEPSEEK_API_KEY is not set.")
+            
+        system_instruction = """你是一位极其温柔、懂得儿童心理学的幼儿园特级教师，名字叫'小探宝'。
+你的任务是与小朋友进行顺畅好玩的互动聊天。在输出中严格返回一个 JSON 对象，结构如下：
+{
+  "user_transcript": "（在这里原样填写小朋友的对话输入）",
+  "assistant_reply": "（在这里填写你作为温柔的探奇老师对小朋友的回答，保持简短、充满童趣，控制在 3-5 句话内）",
+  "requires_drawing": true/false（布尔值，判断小朋友是否有画画的需求，比如提到“画一个...”、“想要一个画”等）,
+  "drawing_prompt": "（如果requires_drawing为true，在此处提取出小朋友想要画画的具体主题，如'小猫'、'红色的赛车'，否则填空字符串）",
+  "psych_metrics": {
+    "detected_emotions": ["（识别出小朋友说话时的主要情绪，如：快乐、同理心、悲伤、焦虑、好奇、愤怒等，可以填1-2个）"],
+    "linguistic_richness_score": （小数值，范围0.0~1.0，根据小朋友话语的句子完整度和词汇丰富度进行打分）,
+    "cognitive_milestone_ref": "（根据小朋友表达的特征，标注其当前的心理与认知发展特征，如：感知运动阶段、前运算符号思维、同理心萌芽等）",
+    "attention_span_seconds": 15（估算的小朋友专注时长，默认15即可）,
+    "key_interests": ["（提取小朋友话语中的核心关切或兴趣，如：小动物、天气、玩具、大自然等，可填1-2个）"],
+    "requires_attention": false（布尔值，若识别到极度消极、焦虑、恐惧、分离焦虑或明显异常心理，则填true，否则为false）
+  }
+}
+请确保你的回复必须是合法的 JSON 对象。绝对不能包含 markdown 格式标记（如 ```json 等），也不能有任何 JSON 以外的解释文本。"""
+
+        try:
+            print(f"[DEBUG] [DEEPSEEK_TEXT] Sending chat to deepseek-chat...")
+            response = self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": text_prompt}
+                ],
+                response_format={"type": "json_object"},
+                timeout=20
+            )
+            content = response.choices[0].message.content
+            print(f"[DEBUG] [DEEPSEEK_TEXT] Raw response: '{content}'")
+            
+            content_clean = content.strip()
+            if content_clean.startswith("```"):
+                lines = content_clean.split("\n")
+                if lines[0].startswith("```json") or lines[0].startswith("```"):
+                    content_clean = "\n".join(lines[1:-1])
+            
+            parsed_data = json.loads(content_clean)
+            return parsed_data
+        except Exception as e:
+            print(f"[ERROR] [DEEPSEEK_TEXT] Error in unified text chat: {e}")
+            raise e
 
     @retry_with_backoff(max_retries=2)
     def transcribe_audio(self, audio_bytes: bytes) -> str:
@@ -234,7 +291,19 @@ class DeepSeekAPI:
         print(f"[DEBUG] [TTS] Generating speech for: '{text[:50]}...' with voice config: {voice_name}")
         providers = []
         
-        # 1. Doubao Voice Design (User requested "使用Doubao-音色设计")
+        # 1. Primary TTS from Env
+        if TTS_API_KEY:
+             providers.append({"name": "Primary (Env)", "key": TTS_API_KEY, "url": TTS_BASE_URL})
+              
+        # 2. SiliconFlow Fallback
+        if SILICONFLOW_API_KEY:
+             providers.append({"name": "SiliconFlow", "key": SILICONFLOW_API_KEY, "url": "https://api.siliconflow.cn/v1"})
+            
+        # 3. OpenAI Fallback
+        if OPENAI_API_KEY:
+            providers.append({"name": "OpenAI", "key": OPENAI_API_KEY, "url": "https://api.openai.com/v1"})
+
+        # 4. Doubao Voice Design (User requested "使用Doubao-音色设计" - but falls back if 404)
         if ARK_API_KEY:
              providers.append({
                  "name": "Doubao-VoiceDesign",
@@ -242,18 +311,6 @@ class DeepSeekAPI:
                  "url": "https://ark.cn-beijing.volces.com/api/v3",
                  "model": ARK_TTS_MODEL
              })
-        
-        # 2. Primary TTS from Env
-        if TTS_API_KEY:
-             providers.append({"name": "Primary (Env)", "key": TTS_API_KEY, "url": TTS_BASE_URL})
-              
-        # 3. SiliconFlow Fallback
-        if SILICONFLOW_API_KEY:
-             providers.append({"name": "SiliconFlow", "key": SILICONFLOW_API_KEY, "url": "https://api.siliconflow.cn/v1"})
-            
-        # 4. OpenAI Fallback
-        if OPENAI_API_KEY:
-            providers.append({"name": "OpenAI", "key": OPENAI_API_KEY, "url": "https://api.openai.com/v1"})
 
         if not providers:
             print("[WARNING] [TTS] No valid TTS providers configured.")
@@ -312,6 +369,14 @@ class DeepSeekAPI:
 
 
 class DoubaoAPI:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
     def __init__(self):
         self.api_key = ARK_API_KEY
         self.base_url = "https://ark.cn-beijing.volces.com/api/v3"
@@ -334,7 +399,6 @@ class DoubaoAPI:
                 prompt=optimized_prompt,
                 size="2K",  # 2K is supported
                 response_format="url",
-                watermark=False,
                 extra_body={
                     "optimize_prompt_options": {
                         "mode": "fast"
@@ -350,25 +414,56 @@ class DoubaoAPI:
 
     @retry_with_backoff(max_retries=2)
     def generate_embedding(self, text: str) -> Optional[List[float]]:
-        if not self.client:
-            return None
-        try:
-            response = self.client.embeddings.create(
-                model="doubao-embedding-vision-240528",
-                input=[text]
-            )
-            return response.data[0].embedding
-        except Exception as e:
-            print(f"[ERROR] [DOUBAO_EMBED] Vision embedding failed, trying text embedding: {e}")
+        # 1. SiliconFlow high-speed fallback
+        if SILICONFLOW_API_KEY:
+            try:
+                print(f"[DEBUG] [EMBED] Trying SiliconFlow with BAAI/bge-m3...")
+                sf_client = OpenAI(api_key=SILICONFLOW_API_KEY, base_url="https://api.siliconflow.cn/v1")
+                response = sf_client.embeddings.create(
+                    model="BAAI/bge-m3",
+                    input=[text]
+                )
+                print(f"[DEBUG] [EMBED] SiliconFlow BAAI/bge-m3 embedding success!")
+                return response.data[0].embedding
+            except Exception as sf_err:
+                print(f"[WARNING] [EMBED] SiliconFlow embedding failed: {sf_err}")
+
+        # 2. OpenAI high-speed fallback
+        if OPENAI_API_KEY:
+            try:
+                print(f"[DEBUG] [EMBED] Trying OpenAI with text-embedding-3-small...")
+                oa_client = OpenAI(api_key=OPENAI_API_KEY)
+                response = oa_client.embeddings.create(
+                    model="text-embedding-3-small",
+                    input=[text]
+                )
+                print(f"[DEBUG] [EMBED] OpenAI text-embedding-3-small success!")
+                return response.data[0].embedding
+            except Exception as oa_err:
+                print(f"[WARNING] [EMBED] OpenAI embedding failed: {oa_err}")
+
+        # 3. Doubao endpoints
+        if self.client:
             try:
                 response = self.client.embeddings.create(
-                    model="doubao-embedding-text-240715",
+                    model="doubao-embedding-vision-240528",
                     input=[text]
                 )
                 return response.data[0].embedding
-            except Exception as e2:
-                print(f"[ERROR] [DOUBAO_EMBED] Text embedding also failed: {e2}")
-                return [0.0] * 1024
+            except Exception as e:
+                print(f"[ERROR] [DOUBAO_EMBED] Vision embedding failed, trying text embedding: {e}")
+                try:
+                    response = self.client.embeddings.create(
+                        model="doubao-embedding-text-240715",
+                        input=[text]
+                    )
+                    return response.data[0].embedding
+                except Exception as e2:
+                    print(f"[ERROR] [DOUBAO_EMBED] Text embedding also failed: {e2}")
+
+        # 4. Pure fallback to dummy embedding to prevent crash/latency
+        print("[WARNING] [EMBED] All embedding methods failed or were not configured. Returning dummy zero vector.")
+        return [0.0] * 1024
 
     @retry_with_backoff(max_retries=2)
     def unified_audio_chat(self, audio_bytes: bytes) -> Optional[Dict[str, Any]]:
@@ -613,7 +708,25 @@ class IdeogramAPI:
             except Exception as e:
                 print(f"Failed to attach reference image: {e}")
                 
-        response = requests.post(url, headers=headers, data=data, files=files if files else None)
+        if files:
+            response = requests.post(url, headers=headers, data=data, files=files)
+        else:
+            headers["Content-Type"] = "application/json"
+            json_data = {
+                "image_request": {
+                    "prompt": full_prompt,
+                    "aspect_ratio": ideo_aspect_ratio,
+                    "rendering_speed": "FLASH",
+                    "style_type": "AUTO",
+                    "magic_prompt": "ON",
+                    "num_images": num_images
+                }
+            }
+            if seed is not None:
+                json_data["image_request"]["seed"] = seed
+                
+            response = requests.post(url, headers=headers, json=json_data)
+            
         if response.status_code == 200:
             result = response.json()
             if result.get("data") and len(result["data"]) > 0:
