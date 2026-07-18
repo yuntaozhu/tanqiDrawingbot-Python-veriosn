@@ -184,6 +184,38 @@ def generate_growths_summary(device_token: str) -> Dict[str, Any]:
     }
 
 
+def parse_bool(val) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.lower().strip() in ("true", "1", "yes", "y", "requires_drawing", "requires_painting")
+    if isinstance(val, (int, float)):
+        return bool(val)
+    return False
+
+
+def extract_drawing_subject(text: str) -> str:
+    if not text:
+        return ""
+    # Remove common prefixes
+    prefixes = [
+        "我想画一个", "我想画一幅", "我想画一只", "我想画一条", "我想画一张", "我想画个", "我想画只", "我想画张", "我想画条", "我想画些", "我想画", 
+        "帮我画一个", "帮我画一幅", "帮我画一只", "帮我画一条", "帮我画一张", "帮我画个", "帮我画只", "帮我画条", "帮我画",
+        "可以画一个", "可以画一幅", "可以画一只", "可以画一条", "可以画一张", "可以画个", "可以画",
+        "画一个", "画一幅", "画一只", "画一条", "画一张", "画只", "画张", "画条", "画画", "画个", "画出", "画一画", "画"
+    ]
+    subject = text
+    for p in prefixes:
+        if subject.startswith(p):
+            subject = subject[len(p):]
+            break
+    # Remove common suffixes/punctuation
+    subject = subject.strip("。，！？.!? ")
+    if subject.endswith("吧") or subject.endswith("呀") or subject.endswith("呗") or subject.endswith("呢"):
+        subject = subject[:-1]
+    return subject.strip()
+
+
 async def process_llm_interaction(prompt_input: Any, api_key: str, device_token: str = None) -> Dict[str, Any]:
     start_time = time.time()
     device_token = device_token or "anonymous_device"
@@ -248,9 +280,30 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
             if res_data:
                 user_text = res_data.get("user_transcript", "")
                 text_response = res_data.get("assistant_reply", "")
-                requires_drawing = res_data.get("requires_drawing", False) or res_data.get("requires_painting", False)
+                requires_drawing = parse_bool(res_data.get("requires_drawing", False)) or parse_bool(res_data.get("requires_painting", False))
                 drawing_prompt = res_data.get("drawing_prompt", "") or res_data.get("painting_prompt", "")
                 psych_metrics = res_data.get("psych_metrics", {})
+                
+                # Apply robust checks/heuristics
+                user_text_lower = user_text.lower() if user_text else ""
+                drawing_keywords = ["画画", "画一个", "画只", "画张", "画条", "画一幅", "画一画", "想要画", "帮我画", "可以画", "画个", "画出", "画一画", "画"]
+                
+                # 1. If user transcript explicitly asks to draw, but the LLM boolean was False
+                if user_text_lower and any(kw in user_text_lower for kw in drawing_keywords) and not requires_drawing:
+                    print(f"[DEBUG] [HEURISTIC] Forcing requires_drawing=True due to drawing keywords in user transcript: '{user_text}'")
+                    requires_drawing = True
+                    
+                # 2. If drawing_prompt is provided but requires_drawing is False, force it to True
+                if drawing_prompt.strip() and not requires_drawing:
+                    print(f"[DEBUG] [HEURISTIC] Forcing requires_drawing=True because drawing_prompt is present: '{drawing_prompt}'")
+                    requires_drawing = True
+                    
+                # 3. If requires_drawing is True but drawing_prompt is empty, extract from user transcript
+                if requires_drawing and not drawing_prompt.strip():
+                    extracted = extract_drawing_subject(user_text)
+                    if extracted:
+                        print(f"[DEBUG] [HEURISTIC] Extracted drawing prompt '{extracted}' from user transcript '{user_text}'")
+                        drawing_prompt = extracted
                 
                 print(f"[DEBUG] [DOUBAO] Unified pipeline success. Transcript: '{user_text}', Reply: '{text_response}', Drawing: {requires_drawing} ({drawing_prompt})")
                 
