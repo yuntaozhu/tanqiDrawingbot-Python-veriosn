@@ -277,8 +277,8 @@ def extract_drawing_subject_advanced(user_text: str, assistant_reply: str) -> st
 async def process_llm_interaction(prompt_input: Any, api_key: str, device_token: str = None) -> Dict[str, Any]:
     start_time = time.time()
     device_token = device_token or "anonymous_device"
-    doubao = DoubaoAPI()
-    deepseek = DeepSeekAPI()
+    doubao = DoubaoAPI.get_instance()
+    deepseek = DeepSeekAPI.get_instance()
     
     # Check if Doubao client is configured
     if doubao.client:

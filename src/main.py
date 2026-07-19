@@ -5,7 +5,16 @@ from src.logger import setup_logger
 
 logger = setup_logger("main")
 
-app = FastAPI(title="Toddler Drawing Dreamer API")
+app = FastAPI(
+    title="Toddler Drawing Dreamer API",
+    description="API for managing toddler drawing and interaction experiences.",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    servers=[
+        {"url": "https://tanqibot.up.railway.app", "description": "Production Server"}
+    ]
+)
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

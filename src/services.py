@@ -585,6 +585,14 @@ class DoubaoAPI:
 
 
 class ReplicateAPI:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
     def __init__(self):
         self.api_key = REPLICATE_API_TOKEN
 
@@ -655,6 +663,14 @@ class ReplicateAPI:
 
 
 class IdeogramAPI:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
     def __init__(self):
         self.api_key = IDEOGRAM_API_KEY
         self.base_url = "https://api.ideogram.ai/v1"
@@ -771,9 +787,9 @@ def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protag
             "metadata": entry.get("metadata", [None] * len(entry.get("urls", [])))
         }
 
-    replicate_api = ReplicateAPI()
-    ideogram_api = IdeogramAPI()
-    doubao_api = DoubaoAPI()
+    replicate_api = ReplicateAPI.get_instance()
+    ideogram_api = IdeogramAPI.get_instance()
+    doubao_api = DoubaoAPI.get_instance()
     
     engines = []
     if doubao_api.client:

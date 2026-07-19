@@ -10,7 +10,7 @@ router = APIRouter()
 
 @router.post("/api/generate")
 async def generate_drawing(req: GenerateRequest):
-    replicate_api = ReplicateAPI()
+    replicate_api = ReplicateAPI.get_instance()
     
     # 1. Translate prompt
     try:
