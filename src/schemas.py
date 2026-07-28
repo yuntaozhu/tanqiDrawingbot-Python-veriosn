@@ -21,3 +21,9 @@ class FeedbackRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     text: str
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: Optional[str] = "child_friendly"
+    speed: Optional[float] = 1.0
+

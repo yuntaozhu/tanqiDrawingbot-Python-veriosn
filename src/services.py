@@ -367,6 +367,14 @@ class DeepSeekAPI:
         print("[ERROR] [TTS] All TTS providers failed.")
         return None
 
+    def generate_speech_bytes(self, text: str, voice_name: Optional[str] = None) -> Optional[bytes]:
+        """Convert text to speech and return raw audio bytes (MP3/WAV)."""
+        base64_data = self.generate_speech(text, voice_name=voice_name)
+        if base64_data:
+            return base64.b64decode(base64_data)
+        return None
+
+
 
 class DoubaoAPI:
     _instance = None
