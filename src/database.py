@@ -1,6 +1,8 @@
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import DatabaseError
+import os
 from src.config import DATABASE_URL
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -13,4 +15,15 @@ from src.models import (
     GenerationHistoryDB, FeedbackDB, PrintJobDB, PsychVectorDB, DeviceSettingsDB
 )
 
-Base.metadata.create_all(bind=engine)
+try:
+    Base.metadata.create_all(bind=engine)
+except Exception as e:
+    print(f"[WARNING] Database initialization encountered error: {e}. Attempting to recreate database...")
+    if DATABASE_URL.startswith("sqlite:///"):
+        db_path = DATABASE_URL.replace("sqlite:///", "")
+        if os.path.exists(db_path):
+            os.remove(db_path)
+            print(f"[INFO] Removed corrupted database file: {db_path}")
+    Base.metadata.create_all(bind=engine)
+    print("[INFO] Database recreated successfully.")
+
