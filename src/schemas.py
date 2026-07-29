@@ -1,5 +1,5 @@
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class GenerateRequest(BaseModel):
     prompt: str
@@ -23,7 +23,8 @@ class ChatRequest(BaseModel):
     text: str
 
 class TTSRequest(BaseModel):
-    text: str
-    voice: Optional[str] = "child_friendly"
-    speed: Optional[float] = 1.0
+    text: str = Field(..., description="待朗读的中文文本", example="小朋友们大家好！")
+    voice: Optional[str] = Field("default", description="音色选择")
+    speed: Optional[float] = Field(1.0, description="语速，范围 0.5-2.0")
+
 

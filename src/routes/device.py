@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request, HTTPException, Response, Query, Body
 from typing import Optional
+from urllib.parse import unquote
 from src.schemas import ChatRequest, TTSRequest
 from src.config import DEEPSEEK_API_KEY
 from src.crud import get_print_jobs_from_db, delete_print_job_from_db
@@ -107,56 +108,94 @@ async def complete_print_job(job_id: str, request: Request):
         raise HTTPException(status_code=500, detail="Failed to delete job from database")
 
 
-@router.get("/api/v1/tts")
-@router.post("/api/v1/tts")
-@router.get("/api/device/v1/tts")
-@router.post("/api/device/v1/tts")
-async def courseware_tts_stream(
-    request: Request,
-    text: Optional[str] = Query(None, description="待朗读的中文文本"),
-    voice: Optional[str] = Query(None, description="发音人类型"),
-    speed: Optional[float] = Query(1.0, description="语速"),
-    body: Optional[TTSRequest] = None
-):
+@router.post("/api/v1/tts", summary="云端 TTS 语音合成 (POST 方式)")
+@router.post("/api/device/v1/tts", summary="云端 TTS 语音合成 (POST 方式)")
+async def tts_post_endpoint(req: TTSRequest, request: Request):
     ua = request.headers.get("user-agent")
     token = request.headers.get("x-device-token") or request.headers.get("authorization")
-    logger.debug(f"[TTS] Incoming TTS request from UA: {ua}, Token present: {bool(token)}")
+    logger.debug(f"[TTS POST] Request from UA: {ua}, Token present: {bool(token)}")
     
-    req_text = text
-    req_voice = voice
-    req_speed = speed
+    text = req.text.strip() if req.text else ""
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
     
-    if not req_text and body:
-        req_text = body.text
-        if body.voice:
-            req_voice = body.voice
-        if body.speed is not None:
-            req_speed = body.speed
-            
-    if not req_text:
-        raise HTTPException(status_code=400, detail="Missing required 'text' parameter or body field.")
-        
     deepseek = DeepSeekAPI.get_instance()
     
-    voice_config = req_voice
-    if req_voice == "child_friendly" or not req_voice:
+    voice_config = req.voice
+    if req.voice == "child_friendly" or not req.voice or req.voice == "default":
         voice_config = "一个极其温柔、友好、可爱的5岁小朋友，用稚嫩温和的语气说话"
-    elif req_voice == "teacher_female":
+    elif req.voice == "teacher_female":
         voice_config = "一位温柔、知性、亲切的幼儿园女老师"
         
     try:
-        audio_bytes = deepseek.generate_speech_bytes(req_text, voice_name=voice_config)
+        audio_bytes = deepseek.generate_speech_bytes(text, voice_name=voice_config)
         if not audio_bytes:
-            raise HTTPException(status_code=500, detail="TTS generation failed or returned empty audio.")
-            
-        logger.debug(f"[TTS] Successfully generated audio stream, size: {len(audio_bytes)} bytes")
-        return Response(content=audio_bytes, media_type="audio/mpeg", headers={
-            "Content-Disposition": "inline; filename=tts.mp3",
-            "Cache-Control": "public, max-age=86400"
-        })
+            raise HTTPException(status_code=500, detail="TTS generation returned empty audio")
+
+        logger.debug(f"[TTS POST] Successfully generated audio, size: {len(audio_bytes)} bytes")
+        return Response(
+            content=audio_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=tts.mp3",
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=86400"
+            }
+        )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"[TTS] Error generating TTS stream: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"[TTS POST] Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"TTS Engine Error: {str(e)}")
+
+
+@router.get("/api/v1/tts", summary="云端 TTS 语音合成 (GET 容错方式)")
+@router.get("/api/device/v1/tts", summary="云端 TTS 语音合成 (GET 容错方式)")
+async def tts_get_endpoint(
+    request: Request,
+    text: str = Query(..., description="待朗读的中文文本"),
+    voice: str = Query("default", description="音色选择"),
+    speed: float = Query(1.0, description="语速，范围 0.5-2.0")
+):
+    ua = request.headers.get("user-agent")
+    token = request.headers.get("x-device-token") or request.headers.get("authorization")
+    logger.debug(f"[TTS GET] Request from UA: {ua}, Token present: {bool(token)}")
+    
+    decoded_text = unquote(text).strip()
+    if not decoded_text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+        
+    # 对 GET 超长文本进行安全截断 (防止引发上游引擎崩溃)
+    if len(decoded_text) > 150:
+        decoded_text = decoded_text[:150]
+        
+    deepseek = DeepSeekAPI.get_instance()
+    
+    voice_config = voice
+    if voice == "child_friendly" or not voice or voice == "default":
+        voice_config = "一个极其温柔、友好、可爱的5岁小朋友，用稚嫩温和的语气说话"
+    elif voice == "teacher_female":
+        voice_config = "一位温柔、知性、亲切的幼儿园女老师"
+
+    try:
+        audio_bytes = deepseek.generate_speech_bytes(decoded_text, voice_name=voice_config)
+        if not audio_bytes:
+            raise HTTPException(status_code=500, detail="TTS GET Error: returned empty audio")
+
+        logger.debug(f"[TTS GET] Successfully generated audio, size: {len(audio_bytes)} bytes")
+        return Response(
+            content=audio_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=tts.mp3",
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=86400"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[TTS GET] Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"TTS GET Error: {str(e)}")
+
 

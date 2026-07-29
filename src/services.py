@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import time
 import io
 from typing import Optional, List, Dict, Any
@@ -56,7 +57,49 @@ IMAGE_CACHE = load_cache(CACHE_FILE)
 STT_CACHE = load_cache(STT_CACHE_FILE)
 TTS_CACHE = load_cache(TTS_CACHE_FILE)
 
+def split_text_into_chunks(text: str, max_chunk_len: int = 120) -> List[str]:
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= max_chunk_len:
+        return [text]
+    
+    sentences = re.split(r'([。！？；\n!?;]+)', text)
+    chunks = []
+    current_chunk = ""
+    
+    for i in range(0, len(sentences), 2):
+        sentence = sentences[i]
+        delimiter = sentences[i+1] if i + 1 < len(sentences) else ""
+        part = sentence + delimiter
+        if not part.strip():
+            continue
+            
+        if len(current_chunk) + len(part) <= max_chunk_len:
+            current_chunk += part
+        else:
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+            current_chunk = part
+            
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+        
+    final_chunks = []
+    for c in chunks:
+        if len(c) <= max_chunk_len:
+            final_chunks.append(c)
+        else:
+            for idx in range(0, len(c), max_chunk_len):
+                sub = c[idx:idx+max_chunk_len]
+                if sub.strip():
+                    final_chunks.append(sub.strip())
+                
+    return final_chunks
+
+
 class DeepSeekAPI:
+
     _instance = None
 
     @classmethod
@@ -331,15 +374,28 @@ class DeepSeekAPI:
                 
                 if provider["name"] == "Doubao-VoiceDesign":
                     model_name = provider.get("model", "Doubao-Seed-VoiceDesign-1.0")
-                    current_voice = current_voice or "一个极其温柔、友好、可爱的5岁小朋友，用稚嫩温和的语气说话"
+                    if not current_voice or current_voice in ["default", "child_friendly"]:
+                        current_voice = "一个极其温柔、友好、可爱的5岁小朋友，用稚嫩温和的语气说话"
+                    elif current_voice == "teacher_female":
+                        current_voice = "一位温柔、知性、亲切的幼儿园女老师"
                 elif "siliconflow.cn" in provider.get("url", "").lower():
                     model_name = "FunAudioLLM/CosyVoice2-0.5B"
-                    # Default to Anna (beautiful storytelling child voice)
-                    current_voice = current_voice or "FunAudioLLM/CosyVoice2-0.5B:anna"
-                    if not current_voice.startswith("FunAudioLLM/CosyVoice2-0.5B:"):
+                    valid_sf_voices = ["anna", "alex", "benjamin", "clara"]
+                    if current_voice in valid_sf_voices:
                         current_voice = f"FunAudioLLM/CosyVoice2-0.5B:{current_voice}"
+                    elif current_voice and current_voice.startswith("FunAudioLLM/CosyVoice2-0.5B:"):
+                        pass
+                    elif current_voice == "teacher_female":
+                        current_voice = "FunAudioLLM/CosyVoice2-0.5B:clara"
+                    else:
+                        current_voice = "FunAudioLLM/CosyVoice2-0.5B:anna"
+
                 else:
-                    current_voice = current_voice or "alloy"
+                    if not current_voice or current_voice in ["default", "child_friendly"] or len(current_voice) > 20:
+                        current_voice = "nova"
+                    elif current_voice == "teacher_female":
+                        current_voice = "alloy"
+
                     
                 response = client.audio.speech.create(
                     model=model_name,
@@ -368,10 +424,22 @@ class DeepSeekAPI:
         return None
 
     def generate_speech_bytes(self, text: str, voice_name: Optional[str] = None) -> Optional[bytes]:
-        """Convert text to speech and return raw audio bytes (MP3/WAV)."""
-        base64_data = self.generate_speech(text, voice_name=voice_name)
-        if base64_data:
-            return base64.b64decode(base64_data)
+        """Convert text to speech and return raw audio bytes (MP3/WAV). Automatically splits long text into chunks."""
+        text = text.strip() if text else ""
+        if not text:
+            return None
+        
+        chunks = split_text_into_chunks(text, max_chunk_len=120)
+        audio_results = []
+        for chunk in chunks:
+            base64_data = self.generate_speech(chunk, voice_name=voice_name)
+            if base64_data:
+                audio_results.append(base64.b64decode(base64_data))
+            else:
+                print(f"[WARNING] [TTS] Chunk generation failed for: '{chunk[:30]}...'")
+                
+        if audio_results:
+            return b"".join(audio_results)
         return None
 
 
