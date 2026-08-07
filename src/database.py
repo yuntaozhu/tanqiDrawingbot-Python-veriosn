@@ -19,11 +19,15 @@ try:
     Base.metadata.create_all(bind=engine)
 except Exception as e:
     print(f"[WARNING] Database initialization encountered error: {e}. Attempting to recreate database...")
+    engine.dispose()
     if DATABASE_URL.startswith("sqlite:///"):
         db_path = DATABASE_URL.replace("sqlite:///", "")
         if os.path.exists(db_path):
-            os.remove(db_path)
-            print(f"[INFO] Removed corrupted database file: {db_path}")
+            try:
+                os.remove(db_path)
+                print(f"[INFO] Removed corrupted database file: {db_path}")
+            except Exception as rm_err:
+                print(f"[ERROR] Failed to remove db file: {rm_err}")
     Base.metadata.create_all(bind=engine)
     print("[INFO] Database recreated successfully.")
 
