@@ -1,11 +1,13 @@
 import time
 import uuid
 import json
+import asyncio
 from typing import Optional, List, Dict, Any
 from fastapi import HTTPException
 import numpy as np
 
 from src.config import DEEPSEEK_API_KEY, ADMIN_KEY
+from src.cache import DrawingCacheManager
 from src.crud import (
     save_history_to_db, save_print_job_to_db, save_psych_vector, 
     query_psych_vectors, get_device_settings
@@ -272,6 +274,116 @@ def extract_drawing_subject_advanced(user_text: str, assistant_reply: str) -> st
                 return sub
                 
     return subject
+
+
+async def async_generate_drawing(subject: str, device_token: str = None) -> Optional[Dict[str, Any]]:
+    """Generates drawing line art asynchronously in parallel with text generation, leveraging Redis/memory cache."""
+    cache_mgr = DrawingCacheManager.get_instance()
+    cached = cache_mgr.get(subject)
+    if cached:
+        print(f"[DEBUG] [ASYNC_DRAW] 0ms Cache Hit for prompt: '{subject}'")
+        job_id = str(uuid.uuid4())
+        action = {
+            "type": "draw",
+            "prompt": subject,
+            "job_id": job_id,
+            "image_url": cached.get("image_url"),
+            "bitmap_hex": cached.get("bitmap_hex")
+        }
+        save_print_job_to_db({
+            "job_id": job_id,
+            "image_url": cached.get("image_url"),
+            "bitmap_hex": cached.get("bitmap_hex"),
+            "prompt": subject,
+            "timestamp": time.time()
+        })
+        return action
+
+    print(f"[DEBUG] [ASYNC_DRAW] Starting background image generation for prompt: '{subject}'...")
+    start_time = time.time()
+
+    def _generate_sync():
+        try:
+            doubao = DoubaoAPI.get_instance()
+            if doubao.client:
+                try:
+                    urls = doubao.generate_image(subject)
+                    if urls:
+                        processed_image = process_line_art_image(urls[0])
+                        bitmap_hex = get_raw_bitmap_hex(urls[0])
+                        return processed_image, bitmap_hex, subject
+                except Exception as e:
+                    print(f"[WARNING] [ASYNC_DRAW] Doubao draw failed: {e}")
+
+            result = generate_image_with_fallback(subject)
+            urls = result.get("urls")
+            if urls:
+                processed_image = process_line_art_image(urls[0])
+                bitmap_hex = get_raw_bitmap_hex(urls[0])
+                return processed_image, bitmap_hex, subject
+        except Exception as e:
+            print(f"[ERROR] [ASYNC_DRAW] Image generation failed: {e}")
+        return None, None, subject
+
+    processed_image, bitmap_hex, prompt = await asyncio.to_thread(_generate_sync)
+
+    if processed_image:
+        job_id = str(uuid.uuid4())
+        job_data = {
+            "job_id": job_id,
+            "image_url": processed_image,
+            "bitmap_hex": bitmap_hex,
+            "prompt": prompt,
+            "timestamp": time.time()
+        }
+        save_print_job_to_db(job_data)
+
+        action = {
+            "type": "draw",
+            "prompt": prompt,
+            "job_id": job_id,
+            "image_url": processed_image,
+            "bitmap_hex": bitmap_hex
+        }
+
+        # Cache asset for instant future requests
+        cache_mgr.set(prompt, action)
+
+        duration = time.time() - start_time
+        print(f"[DEBUG] [ASYNC_DRAW] Image generated and cached in {duration:.2f}s, job_id: {job_id}")
+        return action
+
+    return None
+
+
+async def stream_chat_llm(user_text: str):
+    """Streams chat tokens from DeepSeek or fallback provider."""
+    deepseek = DeepSeekAPI.get_instance()
+    system_instruction = "你是一位极其温柔、懂得儿童心理学的幼儿园特级教师，名字叫'小探宝'。请与小朋友进行顺畅好玩的互动聊天，保持简短、充满童趣，控制在 3-5 句话内。"
+
+    if deepseek.client:
+        try:
+            stream = deepseek.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": user_text}
+                ],
+                stream=True,
+                timeout=30
+            )
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                    await asyncio.sleep(0.005)
+            return
+        except Exception as e:
+            print(f"[ERROR] [STREAM_LLM] DeepSeek stream error: {e}")
+
+    fallback_text = "宝贝你好呀！我是小探宝，今天你想和我聊什么呢？"
+    for char in fallback_text:
+        yield char
+        await asyncio.sleep(0.02)
 
 
 async def process_llm_interaction(prompt_input: Any, api_key: str, device_token: str = None) -> Dict[str, Any]:

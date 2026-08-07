@@ -594,7 +594,7 @@ class DoubaoAPI:
                         ]
                     }
                 ],
-                timeout=25
+                timeout=50
             )
             content = response.choices[0].message.content
             print(f"[DEBUG] [DOUBAO_AUDIO] Raw response: '{content}'")
@@ -642,7 +642,7 @@ class DoubaoAPI:
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": text_prompt}
                 ],
-                timeout=20
+                timeout=50
             )
             content = response.choices[0].message.content
             print(f"[DEBUG] [DOUBAO_TEXT] Raw response: '{content}'")
@@ -795,13 +795,13 @@ class IdeogramAPI:
                     img_data = base64.b64decode(encoded)
                     files["style_reference_images"] = ("reference.png", img_data, "image/png")
                 else:
-                    res = requests.get(ref_image)
+                    res = requests.get(ref_image, timeout=10)
                     files["style_reference_images"] = ("reference.png", res.content, "image/png")
             except Exception as e:
                 print(f"Failed to attach reference image: {e}")
                 
         if files:
-            response = requests.post(url, headers=headers, data=data, files=files)
+            response = requests.post(url, headers=headers, data=data, files=files, timeout=30)
         else:
             headers["Content-Type"] = "application/json"
             json_data = {
@@ -817,7 +817,7 @@ class IdeogramAPI:
             if seed is not None:
                 json_data["image_request"]["seed"] = seed
                 
-            response = requests.post(url, headers=headers, json=json_data)
+            response = requests.post(url, headers=headers, json=json_data, timeout=30)
             
         if response.status_code == 200:
             result = response.json()
