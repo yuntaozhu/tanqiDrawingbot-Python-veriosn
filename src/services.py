@@ -12,6 +12,7 @@ import replicate
 
 from src.config import (
     ARK_API_KEY, ARK_AUDIO_MODEL, ARK_DRAW_MODEL, ARK_TTS_MODEL,
+    EMBEDDING_MODEL_VISION, EMBEDDING_MODEL_TEXT,
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL,
     REPLICATE_API_TOKEN, IDEOGRAM_API_KEY,
     STT_API_KEY, STT_BASE_URL, STT_MODEL,
@@ -522,7 +523,7 @@ class DoubaoAPI:
         if self.client:
             try:
                 response = self.client.embeddings.create(
-                    model="doubao-embedding-vision-240528",
+                    model=EMBEDDING_MODEL_VISION,
                     input=[text]
                 )
                 return response.data[0].embedding
@@ -530,7 +531,7 @@ class DoubaoAPI:
                 print(f"[ERROR] [DOUBAO_EMBED] Vision embedding failed, trying text embedding: {e}")
                 try:
                     response = self.client.embeddings.create(
-                        model="doubao-embedding-text-240715",
+                        model=EMBEDDING_MODEL_TEXT,
                         input=[text]
                     )
                     return response.data[0].embedding
