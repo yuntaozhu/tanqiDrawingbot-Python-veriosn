@@ -8,6 +8,10 @@ from src.utils import process_line_art_image, get_raw_bitmap_hex, get_embedded_b
 
 router = APIRouter()
 
+@router.get("/health")
+async def health_check():
+    return {"status": "ok", "timestamp": time.time()}
+
 @router.post("/api/generate")
 async def generate_drawing(req: GenerateRequest):
     replicate_api = ReplicateAPI.get_instance()
