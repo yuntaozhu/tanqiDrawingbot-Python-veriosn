@@ -6,6 +6,9 @@ from typing import Optional, List, Dict, Any
 from fastapi import HTTPException
 import numpy as np
 
+from src.logger import setup_logger
+logger = setup_logger("business_logic")
+
 from src.config import DEEPSEEK_API_KEY, ADMIN_KEY
 from src.cache import DrawingCacheManager, LLMCacheManager
 from src.crud import (
@@ -13,7 +16,8 @@ from src.crud import (
     query_psych_vectors, get_device_settings
 )
 from src.utils import (
-    process_line_art_image, get_raw_bitmap_hex, get_embedded_bitmap, get_image_metadata
+    process_line_art_image, get_raw_bitmap_hex, get_embedded_bitmap, get_image_metadata,
+    process_line_art_and_bitmap
 )
 from src.services import (
     DeepSeekAPI, DoubaoAPI, ReplicateAPI, generate_image_with_fallback,
@@ -309,8 +313,7 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
                 try:
                     urls = doubao.generate_image(subject)
                     if urls:
-                        processed_image = process_line_art_image(urls[0])
-                        bitmap_hex = get_raw_bitmap_hex(urls[0])
+                        processed_image, bitmap_hex = process_line_art_and_bitmap(urls[0])
                         return processed_image, bitmap_hex, subject
                 except Exception as e:
                     print(f"[WARNING] [ASYNC_DRAW] Doubao draw failed: {e}")
@@ -318,8 +321,7 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
             result = generate_image_with_fallback(subject)
             urls = result.get("urls")
             if urls:
-                processed_image = process_line_art_image(urls[0])
-                bitmap_hex = get_raw_bitmap_hex(urls[0])
+                processed_image, bitmap_hex = process_line_art_and_bitmap(urls[0])
                 return processed_image, bitmap_hex, subject
         except Exception as e:
             print(f"[ERROR] [ASYNC_DRAW] Image generation failed: {e}")
@@ -410,6 +412,12 @@ async def stream_chat_llm(user_text: str):
 
 async def process_llm_interaction(prompt_input: Any, api_key: str, device_token: str = None) -> Dict[str, Any]:
     start_time = time.time()
+    stt_duration = 0.0
+    llm_duration = 0.0
+    draw_duration = 0.0
+    embed_duration = 0.0
+    tts_duration = 0.0
+
     device_token = device_token or "anonymous_device"
     doubao = DoubaoAPI.get_instance()
     deepseek = DeepSeekAPI.get_instance()
@@ -419,25 +427,26 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
     if isinstance(prompt_input, str):
         cached_res = llm_cache.get(prompt_input)
         if cached_res:
-            print(f"[DEBUG] [CACHE] 0ms Cache Hit for LLM Text Input: '{prompt_input}'")
+            logger.info(f"[CACHE] 0ms Cache Hit for LLM Text Input: '{prompt_input}'")
             return cached_res
 
     # Check if Doubao client is configured
     if doubao.client:
         try:
-            print(f"[DEBUG] [CORE] Attempting Doubao unified pipeline for token: {device_token}...")
+            logger.info(f"[CORE] Attempting Doubao unified pipeline for token: {device_token}...")
             if isinstance(prompt_input, bytes):
                 # High-speed modular pipeline: Transcribe via SiliconFlow first, then send to text model
-                print(f"[DEBUG] [FAST_PATH] Transcribing audio with fast STT first...")
+                logger.debug(f"[FAST_PATH] Transcribing audio with fast STT first...")
                 stt_start = time.time()
                 user_text = deepseek.transcribe_audio(prompt_input)
-                print(f"[DEBUG] [FAST_PATH] STT took {time.time() - stt_start:.2f}s. Result: '{user_text}'")
+                stt_duration = time.time() - stt_start
+                logger.info(f"[FAST_PATH] STT took {stt_duration:.2f}s. Result: '{user_text}'")
                 
                 # Check LLM Cache for transcribed text
                 if user_text:
                     cached_res = llm_cache.get(user_text)
                     if cached_res:
-                        print(f"[DEBUG] [CACHE] 0ms Cache Hit for Transcribed Audio: '{user_text}'")
+                        logger.info(f"[CACHE] 0ms Cache Hit for Transcribed Audio: '{user_text}'")
                         return cached_res
                 
                 if not user_text:
@@ -457,37 +466,39 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                     }
                 else:
                     res_data = None
+                    llm_start = time.time()
                     if doubao.client:
                         try:
-                            print(f"[DEBUG] [FAST_PATH] Querying Doubao text-to-JSON model...")
-                            llm_start = time.time()
+                            logger.debug(f"[FAST_PATH] Querying Doubao text-to-JSON model...")
                             res_data = doubao.unified_text_chat(user_text)
-                            print(f"[DEBUG] [FAST_PATH] Doubao Text-to-JSON took {time.time() - llm_start:.2f}s")
                         except Exception as db_err:
-                            print(f"[WARNING] [FAST_PATH] Doubao text-to-JSON failed: {db_err}, trying DeepSeek...")
+                            logger.warning(f"[FAST_PATH] Doubao text-to-JSON failed: {db_err}, trying DeepSeek...")
                     
                     if not res_data and deepseek.client:
                         try:
-                            print(f"[DEBUG] [FAST_PATH] Querying DeepSeek text-to-JSON model...")
-                            llm_start = time.time()
+                            logger.debug(f"[FAST_PATH] Querying DeepSeek text-to-JSON model...")
                             res_data = deepseek.unified_text_chat(user_text)
-                            print(f"[DEBUG] [FAST_PATH] DeepSeek Text-to-JSON took {time.time() - llm_start:.2f}s")
                         except Exception as ds_err:
-                            print(f"[WARNING] [FAST_PATH] DeepSeek text-to-JSON failed: {ds_err}")
+                            logger.warning(f"[FAST_PATH] DeepSeek text-to-JSON failed: {ds_err}")
+                    llm_duration = time.time() - llm_start
+                    logger.info(f"[FAST_PATH] Dialog Text-to-JSON took {llm_duration:.2f}s")
             else:
                 res_data = None
+                llm_start = time.time()
                 if doubao.client:
                     try:
-                        print(f"[DEBUG] [FAST_PATH] Querying Doubao text-to-JSON model (text input)...")
+                        logger.debug(f"[FAST_PATH] Querying Doubao text-to-JSON model (text input)...")
                         res_data = doubao.unified_text_chat(prompt_input)
                     except Exception as db_err:
-                        print(f"[WARNING] [CORE] Doubao text chat failed: {db_err}, trying DeepSeek...")
+                        logger.warning(f"[CORE] Doubao text chat failed: {db_err}, trying DeepSeek...")
                 if not res_data and deepseek.client:
                     try:
-                        print(f"[DEBUG] [FAST_PATH] Querying DeepSeek text-to-JSON model (text input)...")
+                        logger.debug(f"[FAST_PATH] Querying DeepSeek text-to-JSON model (text input)...")
                         res_data = deepseek.unified_text_chat(prompt_input)
                     except Exception as ds_err:
-                        print(f"[WARNING] [CORE] DeepSeek text chat failed: {ds_err}")
+                        logger.warning(f"[CORE] DeepSeek text chat failed: {ds_err}")
+                llm_duration = time.time() - llm_start
+                logger.info(f"[FAST_PATH] Dialog Text-to-JSON took {llm_duration:.2f}s")
                 
             if res_data:
                 user_text = res_data.get("user_transcript", "")
@@ -502,24 +513,24 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                 
                 # 1. If user transcript explicitly asks to draw, but the LLM boolean was False
                 if user_text_lower and any(kw in user_text_lower for kw in drawing_keywords) and not requires_drawing:
-                    print(f"[DEBUG] [HEURISTIC] Forcing requires_drawing=True due to drawing keywords in user transcript: '{user_text}'")
+                    logger.debug(f"[HEURISTIC] Forcing requires_drawing=True due to drawing keywords in user transcript: '{user_text}'")
                     requires_drawing = True
                     
                 # 1.5 If teacher response explicitly confirms drawing, force requires_drawing to True
                 if check_assistant_drawing_trigger(text_response) and not requires_drawing:
-                    print(f"[DEBUG] [HEURISTIC] Forcing requires_drawing=True due to drawing triggers in assistant reply: '{text_response}'")
+                    logger.debug(f"[HEURISTIC] Forcing requires_drawing=True due to drawing triggers in assistant reply: '{text_response}'")
                     requires_drawing = True
  
                 # 2. If drawing_prompt is provided but requires_drawing is False, force it to True
                 if drawing_prompt.strip() and not requires_drawing:
-                    print(f"[DEBUG] [HEURISTIC] Forcing requires_drawing=True because drawing_prompt is present: '{drawing_prompt}'")
+                    logger.debug(f"[HEURISTIC] Forcing requires_drawing=True because drawing_prompt is present: '{drawing_prompt}'")
                     requires_drawing = True
                     
                 # 3. If requires_drawing is True but drawing_prompt is empty, extract from user transcript or assistant reply
                 if requires_drawing and not drawing_prompt.strip():
                     extracted = extract_drawing_subject_advanced(user_text, text_response)
                     if extracted:
-                        print(f"[DEBUG] [HEURISTIC] Extracted drawing prompt '{extracted}' from transcript/reply.")
+                        logger.debug(f"[HEURISTIC] Extracted drawing prompt '{extracted}' from transcript/reply.")
                         drawing_prompt = extracted
                         
                 # 3.5 If requires_drawing is True but drawing_prompt is still empty, use fallback
@@ -527,24 +538,24 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                     interests = psych_metrics.get("key_interests", [])
                     if interests:
                         drawing_prompt = f"可爱的{interests[0]}"
-                        print(f"[DEBUG] [HEURISTIC] No prompt extracted, using fallback from interest: '{drawing_prompt}'")
+                        logger.debug(f"[HEURISTIC] No prompt extracted, using fallback from interest: '{drawing_prompt}'")
                     else:
                         drawing_prompt = "可爱的小兔子"
-                        print(f"[DEBUG] [HEURISTIC] No prompt extracted, using default fallback: '{drawing_prompt}'")
+                        logger.debug(f"[HEURISTIC] No prompt extracted, using default fallback: '{drawing_prompt}'")
                 
-                print(f"[DEBUG] [DOUBAO] Unified pipeline success. Transcript: '{user_text}', Reply: '{text_response}', Drawing: {requires_drawing} ({drawing_prompt})")
+                logger.info(f"[DOUBAO] Unified pipeline success. Transcript: '{user_text}', Reply: '{text_response}', Drawing: {requires_drawing} ({drawing_prompt})")
                 
                 action = None
                 image_url_result = None
                 
                 if requires_drawing and drawing_prompt:
-                    print(f"[DEBUG] [DOUBAO] Triggering Doubao Seedream image generation for prompt: '{drawing_prompt}'")
+                    logger.info(f"[DOUBAO] Triggering Doubao Seedream image generation for prompt: '{drawing_prompt}'")
+                    draw_start = time.time()
                     try:
                         image_urls = doubao.generate_image(drawing_prompt)
                         if image_urls:
                             image_url_result = image_urls[0]
-                            processed_image = process_line_art_image(image_url_result, apply_filter=True)
-                            bitmap_hex = get_raw_bitmap_hex(image_url_result)
+                            processed_image, bitmap_hex = process_line_art_and_bitmap(image_url_result)
                             
                             job_id = str(uuid.uuid4())
                             save_print_job_to_db({
@@ -562,7 +573,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                                 "image_url": processed_image,
                                 "bitmap_hex": bitmap_hex
                             }
-                            print(f"[DEBUG] [DOUBAO] Drawing print job created successfully: {job_id}")
+                            logger.info(f"[DOUBAO] Drawing print job created successfully: {job_id}")
                             
                             generation_id = str(uuid.uuid4())
                             save_history_to_db({
@@ -583,13 +594,12 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                         else:
                             raise ValueError("Seedream returned no URLs")
                     except Exception as draw_err:
-                        print(f"[WARNING] [DOUBAO] Seedream failed, falling back to legacy fallback generator: {draw_err}")
+                        logger.warning(f"[DOUBAO] Seedream failed, falling back to legacy fallback generator: {draw_err}")
                         try:
                             fallback_res = generate_image_with_fallback(drawing_prompt)
                             if fallback_res["urls"]:
                                 image_url_result = fallback_res["urls"][0]
-                                processed_image = process_line_art_image(image_url_result, apply_filter=True)
-                                bitmap_hex = get_raw_bitmap_hex(image_url_result)
+                                processed_image, bitmap_hex = process_line_art_and_bitmap(image_url_result)
                                 job_id = str(uuid.uuid4())
                                 save_print_job_to_db({
                                     "job_id": job_id,
@@ -606,9 +616,12 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                                     "bitmap_hex": bitmap_hex
                                 }
                         except Exception as fb_err:
-                            print(f"[ERROR] [DOUBAO] Fallback generator also failed: {fb_err}")
+                            logger.error(f"[DOUBAO] Fallback generator also failed: {fb_err}")
+                    draw_duration = time.time() - draw_start
+                    logger.info(f"[DOUBAO] Drawing generation and pipeline took {draw_duration:.2f}s")
                 
                 embedding_available = False
+                embed_start = time.time()
                 try:
                     combined_text = f"儿童原句: {user_text}\nAI回复: {text_response}"
                     embedding_vector = doubao.generate_embedding(combined_text)
@@ -622,7 +635,9 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                         "psych_metrics": psych_metrics,
                         "drawing_prompt": drawing_prompt if requires_drawing else None,
                         "drawing_url": image_url_result if image_url_result else None,
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "embedding_valid": embedding_available,
+                        "embedding_available": embedding_available
                     }
                     save_psych_vector(
                         device_token=device_token,
@@ -632,19 +647,37 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                         metadata=vector_metadata
                     )
                 except Exception as vector_err:
-                    print(f"[ERROR] [DOUBAO_VECTOR] Embedding/Vector DB write failed: {vector_err}")
+                    logger.error(f"[DOUBAO_VECTOR] Embedding/Vector DB write failed: {vector_err}")
                     embedding_available = False
+                embed_duration = time.time() - embed_start
+                logger.info(f"[DOUBAO] Embedding vector and metadata DB write took {embed_duration:.2f}s")
                 
                 audio_base64 = None
                 if text_response:
+                    tts_start = time.time()
                     try:
                         voice_config = get_device_settings(device_token)
                         audio_base64 = deepseek.generate_speech(text_response, voice_name=voice_config)
                     except Exception as tts_err:
-                        print(f"[ERROR] [DOUBAO] Speech gen failed: {tts_err}")
+                        logger.error(f"[DOUBAO] Speech gen failed: {tts_err}")
+                    tts_duration = time.time() - tts_start
+                    logger.info(f"[DOUBAO] Speech TTS generation took {tts_duration:.2f}s")
                         
                 total_duration = time.time() - start_time
-                print(f"[DEBUG] [DOUBAO] Total processing finished in {total_duration:.2f}s")
+                
+                # Elegant Performance summary
+                logger.info(
+                    f"\n=================== PERFORMANCE METRICS SUMMARY ===================\n"
+                    f"  [ASR / STT]      : {stt_duration:.2f}s\n"
+                    f"  [LLM / DIALOG]   : {llm_duration:.2f}s\n"
+                    f"  [DRAW / IMAGE]   : {draw_duration:.2f}s\n"
+                    f"  [EMBED / VECTOR] : {embed_duration:.2f}s\n"
+                    f"  [TTS / AUDIO]    : {tts_duration:.2f}s\n"
+                    f"-------------------------------------------------------------------\n"
+                    f"  [TOTAL REQUEST]  : {total_duration:.2f}s\n"
+                    f"==================================================================="
+                )
+                
                 return_payload = {
                     "text_response": text_response,
                     "action": action,
@@ -745,8 +778,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                     
                     if image_urls:
                         print(f"[DEBUG] [CORE] Image generated, processing for line art...")
-                        processed_image = process_line_art_image(image_urls[0])
-                        bitmap_hex = get_raw_bitmap_hex(image_urls[0])
+                        processed_image, bitmap_hex = process_line_art_and_bitmap(image_urls[0])
                         
                         job_id = str(uuid.uuid4())
                         job_data = {
@@ -816,8 +848,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                     
                     if image_urls:
                         print(f"[DEBUG] [CORE] Image generated, processing for line art...")
-                        processed_image = process_line_art_image(image_urls[0])
-                        bitmap_hex = get_raw_bitmap_hex(image_urls[0])
+                        processed_image, bitmap_hex = process_line_art_and_bitmap(image_urls[0])
                         
                         job_id = str(uuid.uuid4())
                         job_data = {

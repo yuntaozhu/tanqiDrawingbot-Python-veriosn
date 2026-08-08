@@ -481,6 +481,16 @@ class DoubaoAPI:
 
     def _expand_imaginative_prompt(self, child_prompt: str) -> str:
         """Expands a simple prompt into an extremely imaginative child-like scenario using the LLM with fast fallback."""
+        if not child_prompt:
+            return ""
+
+        from src.cache import PromptExpandCacheManager
+        cache_mgr = PromptExpandCacheManager.get_instance()
+        cached_expanded = cache_mgr.get(child_prompt)
+        if cached_expanded:
+            print(f"[DEBUG] [PROMPT_EXPAND] Cache Hit! '{child_prompt}' -> '{cached_expanded}'")
+            return cached_expanded
+
         if not self.client or not self.audio_model:
             return self._local_imaginative_expand(child_prompt)
         
@@ -494,7 +504,7 @@ class DoubaoAPI:
             "4. 场景最终必须非常适合被画成黑白简笔画或绘本线稿。"
         )
         try:
-            print(f"[DEBUG] [PROMPT_EXPAND] Requesting LLM expansion with 3.0s timeout for: '{child_prompt}'")
+            print(f"[DEBUG] [PROMPT_EXPAND] Requesting LLM expansion with 10.0s timeout for: '{child_prompt}'")
             response = self.client.chat.completions.create(
                 model=self.audio_model,
                 messages=[
@@ -503,7 +513,7 @@ class DoubaoAPI:
                 ],
                 max_tokens=60,
                 temperature=0.85,
-                timeout=3.0  # Kept tight to prevent UI freezing
+                timeout=10.0  # Increased to 10.0s to allow Doubao to finish properly
             )
             expanded = response.choices[0].message.content.strip()
             # Clean up potential leading/trailing quotes or helper text
@@ -511,6 +521,7 @@ class DoubaoAPI:
             if expanded.startswith("这是一个"):
                 expanded = expanded[4:]
             print(f"[DEBUG] [PROMPT_EXPAND] Success! Expanded to: '{expanded}'")
+            cache_mgr.set(child_prompt, expanded)
             return expanded
         except Exception as e:
             local_exp = self._local_imaginative_expand(child_prompt)
@@ -553,8 +564,20 @@ class DoubaoAPI:
             print(f"[ERROR] [DOUBAO_DRAW] Error generating image: {e}")
             raise RuntimeError(f"Doubao Seedream 5.0 pro API Error: {e}")
 
-    @retry_with_backoff(max_retries=2)
     def generate_embedding(self, text: str) -> Optional[List[float]]:
+        from src.cache import EmbeddingCacheManager
+        cache_mgr = EmbeddingCacheManager.get_instance()
+        cached = cache_mgr.get(text)
+        if cached:
+            return cached
+            
+        embedding = self._generate_embedding_raw(text)
+        if embedding and embedding != [0.0] * 1024:
+            cache_mgr.set(text, embedding)
+        return embedding
+
+    @retry_with_backoff(max_retries=2)
+    def _generate_embedding_raw(self, text: str) -> Optional[List[float]]:
         # 1. SiliconFlow high-speed fallback
         if SILICONFLOW_API_KEY:
             try:

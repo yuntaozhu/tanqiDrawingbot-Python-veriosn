@@ -187,3 +187,271 @@ class LLMCacheManager:
         self.memory_cache[norm_key] = response_data
         self._save_file_cache()
         print(f"[INFO] [CACHE] Cached LLM reply for '{norm_key}'")
+
+
+PROMPT_EXPAND_CACHE_FILE = "prompt_expand_cache.json"
+
+class PromptExpandCacheManager:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self.redis_client = None
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        if redis:
+            try:
+                r = redis.Redis.from_url(redis_url, socket_timeout=1)
+                r.ping()
+                self.redis_client = r
+                print("[INFO] [CACHE] PromptExpandCache connected to Redis successfully.")
+            except Exception:
+                self.redis_client = None
+
+        self.memory_cache: Dict[str, str] = {}
+        self._load_file_cache()
+
+    def _load_file_cache(self):
+        if os.path.exists(PROMPT_EXPAND_CACHE_FILE):
+            try:
+                with open(PROMPT_EXPAND_CACHE_FILE, "r", encoding="utf-8") as f:
+                    self.memory_cache = json.load(f)
+                    print(f"[INFO] [CACHE] Loaded {len(self.memory_cache)} cached prompt expansions from file.")
+            except Exception as e:
+                print(f"[ERROR] [CACHE] Failed loading {PROMPT_EXPAND_CACHE_FILE}: {e}")
+
+    def _save_file_cache(self):
+        try:
+            with open(PROMPT_EXPAND_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.memory_cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[ERROR] [CACHE] Failed saving {PROMPT_EXPAND_CACHE_FILE}: {e}")
+
+    def normalize_text(self, text: str) -> str:
+        if not text:
+            return ""
+        t = text.strip().lower()
+        t = re.sub(r'[^\w\s\u4e00-\u9fff]', '', t)
+        return t.replace(" ", "")
+
+    def get(self, text: str) -> Optional[str]:
+        norm_key = self.normalize_text(text)
+        if not norm_key:
+            return None
+
+        if self.redis_client:
+            try:
+                data = self.redis_client.get(f"prompt_expand:{norm_key}")
+                if data:
+                    val = data.decode('utf-8') if isinstance(data, bytes) else data
+                    print(f"[DEBUG] [CACHE] Redis hit for Prompt Expand: '{norm_key}'")
+                    return val
+            except Exception:
+                pass
+
+        if norm_key in self.memory_cache:
+            print(f"[DEBUG] [CACHE] Memory hit for Prompt Expand: '{norm_key}'")
+            return self.memory_cache[norm_key]
+
+        return None
+
+    def set(self, text: str, expanded_text: str):
+        norm_key = self.normalize_text(text)
+        if not norm_key or not expanded_text:
+            return
+
+        if self.redis_client:
+            try:
+                self.redis_client.set(f"prompt_expand:{norm_key}", expanded_text, ex=86400 * 30)
+            except Exception:
+                pass
+
+        self.memory_cache[norm_key] = expanded_text
+        self._save_file_cache()
+        print(f"[INFO] [CACHE] Cached prompt expansion for '{norm_key}'")
+
+
+EMBEDDING_CACHE_FILE = "embedding_cache.json"
+
+class EmbeddingCacheManager:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self.redis_client = None
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        if redis:
+            try:
+                r = redis.Redis.from_url(redis_url, socket_timeout=1)
+                r.ping()
+                self.redis_client = r
+                print("[INFO] [CACHE] EmbeddingCache connected to Redis successfully.")
+            except Exception:
+                self.redis_client = None
+
+        self.memory_cache: Dict[str, list] = {}
+        self._load_file_cache()
+
+    def _load_file_cache(self):
+        if os.path.exists(EMBEDDING_CACHE_FILE):
+            try:
+                with open(EMBEDDING_CACHE_FILE, "r", encoding="utf-8") as f:
+                    self.memory_cache = json.load(f)
+                    print(f"[INFO] [CACHE] Loaded {len(self.memory_cache)} cached embeddings from file.")
+            except Exception as e:
+                print(f"[ERROR] [CACHE] Failed loading {EMBEDDING_CACHE_FILE}: {e}")
+
+    def _save_file_cache(self):
+        try:
+            with open(EMBEDDING_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.memory_cache, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"[ERROR] [CACHE] Failed saving {EMBEDDING_CACHE_FILE}: {e}")
+
+    def normalize_text(self, text: str) -> str:
+        if not text:
+            return ""
+        t = text.strip().lower()
+        t = re.sub(r'[^\w\s\u4e00-\u9fff]', '', t)
+        return t.replace(" ", "")
+
+    def get(self, text: str) -> Optional[list]:
+        norm_key = self.normalize_text(text)
+        if not norm_key:
+            return None
+
+        if self.redis_client:
+            try:
+                data = self.redis_client.get(f"embedding:{norm_key}")
+                if data:
+                    print(f"[DEBUG] [CACHE] Redis hit for Embedding: '{norm_key[:10]}...'")
+                    return json.loads(data)
+            except Exception:
+                pass
+
+        if norm_key in self.memory_cache:
+            print(f"[DEBUG] [CACHE] Memory hit for Embedding: '{norm_key[:10]}...'")
+            return self.memory_cache[norm_key]
+
+        return None
+
+    def set(self, text: str, vector: list):
+        norm_key = self.normalize_text(text)
+        if not norm_key or not vector:
+            return
+
+        # Do not cache dummy zero vectors!
+        if vector == [0.0] * 1024:
+            return
+
+        if self.redis_client:
+            try:
+                self.redis_client.set(f"embedding:{norm_key}", json.dumps(vector), ex=86400 * 30)
+            except Exception:
+                pass
+
+        self.memory_cache[norm_key] = vector
+        self._save_file_cache()
+        print(f"[INFO] [CACHE] Cached Embedding vector for '{norm_key[:10]}...'")
+
+
+PSYCH_PROFILE_CACHE_FILE = "psych_profile_cache.json"
+
+class PsychProfileCacheManager:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self.redis_client = None
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        if redis:
+            try:
+                r = redis.Redis.from_url(redis_url, socket_timeout=1)
+                r.ping()
+                self.redis_client = r
+                print("[INFO] [CACHE] PsychProfileCache connected to Redis successfully.")
+            except Exception:
+                self.redis_client = None
+
+        self.memory_cache: Dict[str, list] = {}
+        self._load_file_cache()
+
+    def _load_file_cache(self):
+        if os.path.exists(PSYCH_PROFILE_CACHE_FILE):
+            try:
+                with open(PSYCH_PROFILE_CACHE_FILE, "r", encoding="utf-8") as f:
+                    self.memory_cache = json.load(f)
+                    print(f"[INFO] [CACHE] Loaded {len(self.memory_cache)} cached psych profiles from file.")
+            except Exception as e:
+                print(f"[ERROR] [CACHE] Failed loading {PSYCH_PROFILE_CACHE_FILE}: {e}")
+
+    def _save_file_cache(self):
+        try:
+            with open(PSYCH_PROFILE_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.memory_cache, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"[ERROR] [CACHE] Failed saving {PSYCH_PROFILE_CACHE_FILE}: {e}")
+
+    def get_profiles(self, device_token: str) -> Optional[list]:
+        if not device_token:
+            return None
+
+        if self.redis_client:
+            try:
+                data = self.redis_client.get(f"psych_profile:{device_token}")
+                if data:
+                    print(f"[DEBUG] [CACHE] Redis hit for Psych Profile: '{device_token[:5]}***'")
+                    return json.loads(data)
+            except Exception:
+                pass
+
+        if device_token in self.memory_cache:
+            print(f"[DEBUG] [CACHE] Memory hit for Psych Profile: '{device_token[:5]}***'")
+            return self.memory_cache[device_token]
+
+        return None
+
+    def set_profiles(self, device_token: str, profiles: list):
+        if not device_token or profiles is None:
+            return
+
+        if self.redis_client:
+            try:
+                self.redis_client.set(f"psych_profile:{device_token}", json.dumps(profiles, ensure_ascii=False), ex=600)
+            except Exception:
+                pass
+
+        self.memory_cache[device_token] = profiles
+        self._save_file_cache()
+        print(f"[INFO] [CACHE] Cached {len(profiles)} psych profiles for '{device_token[:5]}***'")
+
+    def invalidate(self, device_token: str):
+        if not device_token:
+            return
+
+        if self.redis_client:
+            try:
+                self.redis_client.delete(f"psych_profile:{device_token}")
+            except Exception:
+                pass
+
+        if device_token in self.memory_cache:
+            del self.memory_cache[device_token]
+            self._save_file_cache()
+            print(f"[INFO] [CACHE] Invalidated psych profile cache for '{device_token[:5]}***'")
+
+

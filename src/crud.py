@@ -147,6 +147,10 @@ def save_psych_vector(device_token: str, child_text: str, ai_response: str, embe
         db.add(db_entry)
         db.commit()
         print(f"[DEBUG] [DB] Successfully saved psych vector for token: {device_token}")
+        
+        # Invalidate cached psych profiles for this token to guarantee freshness
+        from src.cache import PsychProfileCacheManager
+        PsychProfileCacheManager.get_instance().invalidate(device_token)
     except Exception as e:
         print(f"[ERROR] [DB] Failed to save psych vector: {e}")
         db.rollback()
@@ -154,10 +158,16 @@ def save_psych_vector(device_token: str, child_text: str, ai_response: str, embe
         db.close()
 
 def query_psych_vectors(device_token: str) -> List[Dict[str, Any]]:
+    from src.cache import PsychProfileCacheManager
+    cache_mgr = PsychProfileCacheManager.get_instance()
+    cached = cache_mgr.get_profiles(device_token)
+    if cached is not None:
+        return cached
+
     db = SessionLocal()
     try:
         entries = db.query(PsychVectorDB).filter(PsychVectorDB.device_token == device_token).order_by(PsychVectorDB.timestamp.desc()).all()
-        return [
+        results = [
             {
                 "id": e.id,
                 "device_token": e.device_token,
@@ -169,6 +179,9 @@ def query_psych_vectors(device_token: str) -> List[Dict[str, Any]]:
             }
             for e in entries
         ]
+        # Cache retrieved results
+        cache_mgr.set_profiles(device_token, results)
+        return results
     except Exception as e:
         print(f"[ERROR] [DB] Failed to query psych vectors: {e}")
         return []
@@ -212,3 +225,44 @@ def get_device_settings(device_token: str) -> str:
         return "FunAudioLLM/CosyVoice2-0.5B:anna"
     finally:
         db.close()
+
+def cleanup_zero_vectors_in_db():
+    db = SessionLocal()
+    try:
+        entries = db.query(PsychVectorDB).all()
+        updated_count = 0
+        for e in entries:
+            try:
+                embedding = json.loads(e.embedding_json) if e.embedding_json else []
+                # Check if it is a dummy vector (all elements are zero or empty)
+                is_zero = len(embedding) == 0 or all(x == 0.0 for x in embedding)
+                
+                metadata = json.loads(e.metadata_json) if e.metadata_json else {}
+                changed = False
+                
+                if is_zero:
+                    if metadata.get("embedding_valid") is not False:
+                        metadata["embedding_valid"] = False
+                        metadata["embedding_available"] = False
+                        changed = True
+                else:
+                    if metadata.get("embedding_valid") is not True:
+                        metadata["embedding_valid"] = True
+                        metadata["embedding_available"] = True
+                        changed = True
+                
+                if changed:
+                    e.metadata_json = json.dumps(metadata)
+                    updated_count += 1
+            except Exception as entry_err:
+                print(f"[WARNING] Failed to process entry during cleanup: {entry_err}")
+                
+        if updated_count > 0:
+            db.commit()
+            print(f"[INFO] [DB_CLEANUP] Successfully marked/cleaned up {updated_count} zero-vector records in psych_vectors.")
+    except Exception as e:
+        print(f"[ERROR] [DB_CLEANUP] Failed to cleanup zero vectors: {e}")
+        db.rollback()
+    finally:
+        db.close()
+

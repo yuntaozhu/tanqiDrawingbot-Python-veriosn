@@ -98,6 +98,18 @@ def process_line_art_image(image_url: str, size: int = 320, apply_filter: bool =
         print(f"Error processing image: {e}")
         return image_url
 
+def process_line_art_and_bitmap(image_url: str, size: int = 320) -> tuple[str, str]:
+    """Downloads an image exactly once and extracts both processed base64 line-art and raw packed binary hex."""
+    try:
+        img = load_image(image_url)
+        img_filtered = apply_line_art_filter(img, size)
+        processed_image = encode_image_to_base64(img_filtered)
+        bitmap_hex = img_filtered.tobytes().hex()
+        return processed_image, bitmap_hex
+    except Exception as e:
+        print(f"[ERROR] Combined line art and bitmap processing failed: {e}")
+        return image_url, ""
+
 def get_raw_bitmap_hex(image_url: str, size: int = 320) -> Optional[str]:
     try:
         img = load_image(image_url)

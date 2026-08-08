@@ -8,7 +8,8 @@ from src.main import app
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "3000"))
-    print(f"Starting server on port {port}...")
-    uvicorn.run("app:app", host="0.0.0.0", port=port, log_config=None, timeout_keep_alive=30)
+    workers = int(os.getenv("CONCURRENCY_WORKERS", "4"))
+    print(f"Starting server on port {port} with {workers} workers...")
+    uvicorn.run("app:app", host="0.0.0.0", port=port, workers=workers, log_config=None, timeout_keep_alive=30)
 
 
