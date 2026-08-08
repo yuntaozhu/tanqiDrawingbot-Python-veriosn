@@ -56,6 +56,25 @@ async def startup_event():
     import os
     import time
     
+    logger.info("[STARTUP] ========== Application Starting ==========")
+    
+    # 1. 测试数据库连接
+    logger.info("[STARTUP] Testing database connection...")
+    try:
+        from src.database import test_db_connection, init_db
+        if test_db_connection():
+            logger.info("[STARTUP] ✅ Database connection successful")
+            # 初始化数据库表
+            if init_db():
+                logger.info("[STARTUP] ✅ Database tables initialized")
+            else:
+                logger.warning("[STARTUP] ⚠️ Database initialization had issues")
+        else:
+            logger.warning("[STARTUP] ⚠️ Database connection test failed")
+    except Exception as e:
+        logger.warning(f"[STARTUP] ⚠️ Database initialization error: {e}")
+    
+    # 2. 运行原有的清理任务
     lock_path = ".db_cleanup.lock"
     should_run = False
     
@@ -95,6 +114,8 @@ async def startup_event():
                 pass
     else:
         logger.info("[STARTUP] Skipping database cleanup (handled by another primary worker process).")
+    
+    logger.info("[STARTUP] ========== Application Ready ==========")
 
 @app.get("/")
 async def root():
@@ -110,3 +131,4 @@ async def favicon():
 
 # Include the routers
 app.include_router(router)
+

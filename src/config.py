@@ -7,8 +7,12 @@ load_dotenv()
 PORT = int(os.getenv("PORT", "3000"))
 ADMIN_KEY = os.getenv("ADMIN_KEY")
 
-# DB URL
-DATABASE_URL = "sqlite:///./app_history.db"
+# DB URL - Support Railway PostgreSQL
+# Priority: DATABASE_URL (Railway PostgreSQL) > SQLite fallback
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    # Fallback to SQLite if no PostgreSQL is available
+    DATABASE_URL = "sqlite:///./app_history.db"
 
 # API Keys and endpoints
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") or os.getenv("API_KEY")
@@ -50,3 +54,4 @@ ARK_DRAW_MODEL = os.getenv("ARK_DRAW_MODEL", "doubao-seedream-5-0-pro-260628")
 ARK_TTS_MODEL = os.getenv("ARK_TTS_MODEL", "Doubao-Seed-VoiceDesign-1-0")
 EMBEDDING_MODEL_VISION = os.getenv("EMBEDDING_MODEL_VISION", "doubao-embedding-vision-251215")
 EMBEDDING_MODEL_TEXT = os.getenv("EMBEDDING_MODEL_TEXT", "doubao-embedding-large-text-250515")
+
