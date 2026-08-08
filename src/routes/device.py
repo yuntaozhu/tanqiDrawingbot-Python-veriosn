@@ -85,7 +85,15 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
         # Wait for parallel drawing generation if triggered
         if drawing_task:
             try:
-                action_result = await drawing_task
+                while not drawing_task.done():
+                    try:
+                        action_result = await asyncio.wait_for(asyncio.shield(drawing_task), timeout=1.0)
+                        break
+                    except asyncio.TimeoutError:
+                        # Yield an SSE comment heartbeat to keep connection alive and reset idle proxies
+                        yield ": heartbeat\n\n"
+                if drawing_task.done():
+                    action_result = drawing_task.result()
             except Exception as task_err:
                 logger.error(f"[CHAT_SSE] Async drawing task error: {task_err}")
                 action_result = None

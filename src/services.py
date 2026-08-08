@@ -6,7 +6,7 @@ import re
 import time
 import io
 from typing import Optional, List, Dict, Any
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 import requests
 import replicate
 
@@ -113,6 +113,7 @@ class DeepSeekAPI:
         self.api_key = DEEPSEEK_API_KEY
         self.base_url = DEEPSEEK_BASE_URL
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
+        self.async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
 
     @retry_with_backoff(max_retries=3)
     def generate_text(self, prompt: str, system_instruction: str = "You are a helpful assistant.", tools: List[Dict] = None) -> Dict[str, Any]:
@@ -444,7 +445,6 @@ class DeepSeekAPI:
         return None
 
 
-
 class DoubaoAPI:
     _instance = None
 
@@ -460,11 +460,28 @@ class DoubaoAPI:
         self.audio_model = ARK_AUDIO_MODEL
         self.draw_model = ARK_DRAW_MODEL
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
+        self.async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
+
+    def _local_imaginative_expand(self, prompt: str) -> str:
+        import random
+        # If the user prompt is already detailed or contains actions, keep it intact to respect their imagination
+        if len(prompt) > 8:
+            return prompt
+        
+        scenarios = [
+            f"长着神奇小翅膀、在梦幻星空里快乐飞翔钓星星的卡通可爱{prompt}",
+            f"在五彩斑斓的彩虹桥和软绵绵云朵乐园里开心捉迷藏的Q版{prompt}",
+            f"开着胡萝卜小飞船在糖果星球和饼干城堡里大冒险的萌系{prompt}",
+            f"在奇妙的海底水晶宫殿里和彩色泡泡小鱼一起快乐弹钢琴的卡通{prompt}",
+            f"戴着亮晶晶魔法皇冠在童话森林和会唱歌的花朵们一起跳舞的可爱{prompt}",
+            f"躺在软乎乎的棉花糖白云被子里甜甜做美梦的超级治愈系{prompt}"
+        ]
+        return random.choice(scenarios)
 
     def _expand_imaginative_prompt(self, child_prompt: str) -> str:
-        """Expands a simple prompt into an extremely imaginative child-like scenario using the LLM."""
+        """Expands a simple prompt into an extremely imaginative child-like scenario using the LLM with fast fallback."""
         if not self.client or not self.audio_model:
-            return child_prompt
+            return self._local_imaginative_expand(child_prompt)
         
         system_instruction = (
             "你是一个儿童艺术与创意想象力专家。请将用户输入的简单主体（例如'猫'、'小汽车'、'火箭'）"
@@ -476,16 +493,16 @@ class DoubaoAPI:
             "4. 场景最终必须非常适合被画成黑白简笔画或绘本线稿。"
         )
         try:
-            print(f"[DEBUG] [PROMPT_EXPAND] Requesting LLM expansion for: '{child_prompt}'")
+            print(f"[DEBUG] [PROMPT_EXPAND] Requesting LLM expansion with 3.0s timeout for: '{child_prompt}'")
             response = self.client.chat.completions.create(
                 model=self.audio_model,
                 messages=[
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": f"请把这个绘图主题扩展为一个充满童心想象力的画面：{child_prompt}"}
                 ],
-                max_tokens=100,
+                max_tokens=60,
                 temperature=0.85,
-                timeout=10
+                timeout=3.0  # Kept tight to prevent UI freezing
             )
             expanded = response.choices[0].message.content.strip()
             # Clean up potential leading/trailing quotes or helper text
@@ -495,8 +512,9 @@ class DoubaoAPI:
             print(f"[DEBUG] [PROMPT_EXPAND] Success! Expanded to: '{expanded}'")
             return expanded
         except Exception as e:
-            print(f"[WARNING] [PROMPT_EXPAND] Prompt expansion failed: {e}. Using original.")
-            return child_prompt
+            local_exp = self._local_imaginative_expand(child_prompt)
+            print(f"[WARNING] [PROMPT_EXPAND] LLM expansion failed ({e}). Falling back to local imaginative expansion: '{local_exp}'")
+            return local_exp
 
     @retry_with_backoff(max_retries=2)
     def generate_image(self, prompt: str, aspect_ratio: str = "1:1", num_images: int = 1) -> Optional[List[str]]:
@@ -523,7 +541,7 @@ class DoubaoAPI:
                 response_format="url",
                 extra_body={
                     "optimize_prompt_options": {
-                        "mode": "standard"  # standard mode produces much higher quality and creativity than fast mode
+                        "mode": "fast"  # fast mode is highly optimized for ultra low latency / high speed
                     }
                 }
             )

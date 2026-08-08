@@ -357,24 +357,24 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
 
 
 async def stream_chat_llm(user_text: str):
-    """Streams chat tokens from Doubao or fallback provider."""
+    """Streams chat tokens from Doubao or fallback provider using async client."""
     doubao = DoubaoAPI.get_instance()
     deepseek = DeepSeekAPI.get_instance()
     system_instruction = "你是一位极其温柔、懂得儿童心理学的幼儿园特级教师，名字叫'小探宝'。请与小朋友进行顺畅好玩的互动聊天，保持简短、充满童趣，控制在 3-5 句话内。"
 
-    if doubao.client:
+    if doubao.async_client:
         try:
-            print(f"[DEBUG] [STREAM_LLM] Attempting stream with Doubao: '{user_text}'")
-            stream = doubao.client.chat.completions.create(
+            print(f"[DEBUG] [STREAM_LLM] Attempting stream with Doubao (Async): '{user_text}'")
+            stream = await doubao.async_client.chat.completions.create(
                 model=doubao.audio_model,
                 messages=[
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": user_text}
                 ],
                 stream=True,
-                timeout=30
+                timeout=15
             )
-            for chunk in stream:
+            async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
                     await asyncio.sleep(0.005)
@@ -382,19 +382,19 @@ async def stream_chat_llm(user_text: str):
         except Exception as e:
             print(f"[ERROR] [STREAM_LLM] Doubao stream error: {e}, falling back to DeepSeek...")
 
-    if deepseek.client:
+    if deepseek.async_client:
         try:
-            print(f"[DEBUG] [STREAM_LLM] Attempting stream with DeepSeek: '{user_text}'")
-            stream = deepseek.client.chat.completions.create(
+            print(f"[DEBUG] [STREAM_LLM] Attempting stream with DeepSeek (Async): '{user_text}'")
+            stream = await deepseek.async_client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": user_text}
                 ],
                 stream=True,
-                timeout=30
+                timeout=15
             )
-            for chunk in stream:
+            async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
                     await asyncio.sleep(0.005)
