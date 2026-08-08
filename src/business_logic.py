@@ -357,12 +357,34 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
 
 
 async def stream_chat_llm(user_text: str):
-    """Streams chat tokens from DeepSeek or fallback provider."""
+    """Streams chat tokens from Doubao or fallback provider."""
+    doubao = DoubaoAPI.get_instance()
     deepseek = DeepSeekAPI.get_instance()
     system_instruction = "你是一位极其温柔、懂得儿童心理学的幼儿园特级教师，名字叫'小探宝'。请与小朋友进行顺畅好玩的互动聊天，保持简短、充满童趣，控制在 3-5 句话内。"
 
+    if doubao.client:
+        try:
+            print(f"[DEBUG] [STREAM_LLM] Attempting stream with Doubao: '{user_text}'")
+            stream = doubao.client.chat.completions.create(
+                model=doubao.audio_model,
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": user_text}
+                ],
+                stream=True,
+                timeout=30
+            )
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                    await asyncio.sleep(0.005)
+            return
+        except Exception as e:
+            print(f"[ERROR] [STREAM_LLM] Doubao stream error: {e}, falling back to DeepSeek...")
+
     if deepseek.client:
         try:
+            print(f"[DEBUG] [STREAM_LLM] Attempting stream with DeepSeek: '{user_text}'")
             stream = deepseek.client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
@@ -420,31 +442,37 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                     }
                 else:
                     res_data = None
-                    if deepseek.client:
+                    if doubao.client:
+                        try:
+                            print(f"[DEBUG] [FAST_PATH] Querying Doubao text-to-JSON model...")
+                            llm_start = time.time()
+                            res_data = doubao.unified_text_chat(user_text)
+                            print(f"[DEBUG] [FAST_PATH] Doubao Text-to-JSON took {time.time() - llm_start:.2f}s")
+                        except Exception as db_err:
+                            print(f"[WARNING] [FAST_PATH] Doubao text-to-JSON failed: {db_err}, trying DeepSeek...")
+                    
+                    if not res_data and deepseek.client:
                         try:
                             print(f"[DEBUG] [FAST_PATH] Querying DeepSeek text-to-JSON model...")
                             llm_start = time.time()
                             res_data = deepseek.unified_text_chat(user_text)
                             print(f"[DEBUG] [FAST_PATH] DeepSeek Text-to-JSON took {time.time() - llm_start:.2f}s")
                         except Exception as ds_err:
-                            print(f"[WARNING] [FAST_PATH] DeepSeek text-to-JSON failed: {ds_err}, trying Doubao...")
-                    
-                    if not res_data:
-                        print(f"[DEBUG] [FAST_PATH] Querying Doubao text-to-JSON model...")
-                        llm_start = time.time()
-                        res_data = doubao.unified_text_chat(user_text)
-                        print(f"[DEBUG] [FAST_PATH] Doubao Text-to-JSON took {time.time() - llm_start:.2f}s")
+                            print(f"[WARNING] [FAST_PATH] DeepSeek text-to-JSON failed: {ds_err}")
             else:
                 res_data = None
-                if deepseek.client:
+                if doubao.client:
+                    try:
+                        print(f"[DEBUG] [FAST_PATH] Querying Doubao text-to-JSON model (text input)...")
+                        res_data = doubao.unified_text_chat(prompt_input)
+                    except Exception as db_err:
+                        print(f"[WARNING] [CORE] Doubao text chat failed: {db_err}, trying DeepSeek...")
+                if not res_data and deepseek.client:
                     try:
                         print(f"[DEBUG] [FAST_PATH] Querying DeepSeek text-to-JSON model (text input)...")
                         res_data = deepseek.unified_text_chat(prompt_input)
                     except Exception as ds_err:
                         print(f"[WARNING] [CORE] DeepSeek text chat failed: {ds_err}")
-                if not res_data:
-                    print(f"[DEBUG] [FAST_PATH] Querying Doubao text-to-JSON model (text input)...")
-                    res_data = doubao.unified_text_chat(prompt_input)
                 
             if res_data:
                 user_text = res_data.get("user_transcript", "")
