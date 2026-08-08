@@ -461,24 +461,69 @@ class DoubaoAPI:
         self.draw_model = ARK_DRAW_MODEL
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
 
+    def _expand_imaginative_prompt(self, child_prompt: str) -> str:
+        """Expands a simple prompt into an extremely imaginative child-like scenario using the LLM."""
+        if not self.client or not self.audio_model:
+            return child_prompt
+        
+        system_instruction = (
+            "你是一个儿童艺术与创意想象力专家。请将用户输入的简单主体（例如'猫'、'小汽车'、'火箭'）"
+            "拓展为一个天马行空、充满星空童真、极具儿童绘画构思与奇妙想象力的绘图场景描述。\n"
+            "【规则】\n"
+            "1. 构思必须非常新颖、奇妙、富有童心与幻想色彩（例如：‘长着翅膀在云朵彩虹桥上飞翔的胡萝卜小汽车’，‘在星空里钓发光星星的宇航员小熊’，‘在海底开着潜水艇弹钢琴的章鱼’）。\n"
+            "2. 只需要提供一两句话的画面场景核心要素，用词要童趣、可爱。\n"
+            "3. 只输出这个画面构思本身，字数在 50 字以内，绝对不要包含任何前缀、解释、Markdown 格式、引号、多余描述或标序。\n"
+            "4. 场景最终必须非常适合被画成黑白简笔画或绘本线稿。"
+        )
+        try:
+            print(f"[DEBUG] [PROMPT_EXPAND] Requesting LLM expansion for: '{child_prompt}'")
+            response = self.client.chat.completions.create(
+                model=self.audio_model,
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": f"请把这个绘图主题扩展为一个充满童心想象力的画面：{child_prompt}"}
+                ],
+                max_tokens=100,
+                temperature=0.85,
+                timeout=10
+            )
+            expanded = response.choices[0].message.content.strip()
+            # Clean up potential leading/trailing quotes or helper text
+            expanded = expanded.replace('"', '').replace('“', '').replace('”', '').replace('\'', '')
+            if expanded.startswith("这是一个"):
+                expanded = expanded[4:]
+            print(f"[DEBUG] [PROMPT_EXPAND] Success! Expanded to: '{expanded}'")
+            return expanded
+        except Exception as e:
+            print(f"[WARNING] [PROMPT_EXPAND] Prompt expansion failed: {e}. Using original.")
+            return child_prompt
+
     @retry_with_backoff(max_retries=2)
     def generate_image(self, prompt: str, aspect_ratio: str = "1:1", num_images: int = 1) -> Optional[List[str]]:
         if not self.client:
             raise ValueError("ARK_API_KEY is not set.")
         
-        # Native Chinese prompt strategy
-        optimized_prompt = f"极简黑白儿童简笔画，一个可爱卡通的{prompt}，高对比度，纯白背景，纯黑线条，1-bit 扁平矢量线稿，无渐变，无阴影，居中，极简美学，适合热敏纸打印。CRITICAL: NO TEXT, NO ENGLISH WORDS."
+        # Expand prompt first for maximum child-like creativity and imagination
+        expanded_prompt = self._expand_imaginative_prompt(prompt)
+        
+        # Native Chinese prompt strategy for Doubao Seedream 5.0 pro
+        optimized_prompt = (
+            f"天马行空的儿童涂色本线稿，极其富有儿童构思与童真想象力：{expanded_prompt}。"
+            f"画面只有纯粹的黑白单色线条，具有加粗平滑的卡通轮廓线条，纯白背景，高对比度，没有半点阴影或渐变，"
+            f"没有灰色调，1-bit 干净矢量线稿。构图居中饱满，富有童话故事趣味，完美适合儿童热敏纸打印和上色涂涂乐。"
+            f"CRITICAL: NO REALISTIC SHADING, NO GRADIENTS, NO GREYSCALE, NO TEXT, NO ENGLISH WORDS."
+        )
         
         print(f"[DEBUG] [DOUBAO_DRAW] Generating prompt: '{optimized_prompt}'")
         try:
             response = self.client.images.generate(
                 model=self.draw_model,
                 prompt=optimized_prompt,
-                size="2K",  # 2K is supported
+                size="1.5K",  # 1.5K is supported, and is more creative and price-effective than 1K
                 response_format="url",
                 extra_body={
                     "optimize_prompt_options": {
-                        "mode": "fast"
+                        "mode": "standard"  # standard mode produces much higher quality and creativity than fast mode
                     }
                 }
             )
