@@ -1,0 +1,134 @@
+【豆包 API 优先调用 - 快速开发提示词】
+
+【目标】
+修改 src/business_logic.py,将所有 LLM 调用的优先级改为:
+1️⃣ 优先使用豆包(Doubao)API
+2️⃣ 备用使用 DeepSeek API
+
+【问题】
+DNS 日志显示所有请求都发往 api.deepseek.com,说明 DeepSeek 被优先调用了。
+需要改成豆包优先。
+
+【修改位置】
+
+### 修改 1: stream_chat_llm() 函数(约 230 行)
+
+当前逻辑(错误):
+```python
+if deepseek.client:
+    # DeepSeek 流式处理
+else:
+    # 备用文本
+```
+
+改为(正确):
+```python
+if doubao.client:
+    # 豆包流式处理(优先)
+    try:
+        stream = doubao.client.chat.completions.create(
+            model=doubao.audio_model,
+            messages=[...],
+            stream=True
+        )
+        # yield chunks
+    except:
+        pass  # 继续到 DeepSeek
+
+if deepseek.client and not already_succeeded:
+    # DeepSeek 流式处理(备用)
+else:
+    # 备用文本
+```
+
+### 修改 2: process_llm_interaction() - 音频部分(约 260-300 行)
+
+当前逻辑(错误):
+```python
+if isinstance(prompt_input, bytes):
+    # 转录音频
+    if deepseek.client:
+        res_data = deepseek.unified_text_chat(user_text)  # ❌ DeepSeek 优先
+    if not res_data:
+        res_data = doubao.unified_text_chat(user_text)  # ❌ 仅作备用
+```
+
+改为(正确):
+```python
+if isinstance(prompt_input, bytes):
+    # 转录音频
+    res_data = None
+    
+    if doubao.client:  # ✅ 豆包优先
+        try:
+            res_data = doubao.unified_text_chat(user_text)
+        except:
+            pass
+    
+    if not res_data and deepseek.client:  # ✅ 仅当豆包失败时使用
+        try:
+            res_data = deepseek.unified_text_chat(user_text)
+        except:
+            pass
+```
+
+### 修改 3: process_llm_interaction() - 文本部分(约 300-330 行)
+
+当前逻辑(错误):
+```python
+else:  # 非 bytes 输入
+    if deepseek.client:  # ❌ DeepSeek 优先
+        res_data = deepseek.unified_text_chat(prompt_input)
+    if not res_data:  # ❌ 仅作备用
+        res_data = doubao.unified_text_chat(prompt_input)
+```
+
+改为(正确):
+```python
+else:  # 非 bytes 输入
+    res_data = None
+    
+    if doubao.client:  # ✅ 豆包优先
+        try:
+            res_data = doubao.unified_text_chat(prompt_input)
+        except:
+            pass
+    
+    if not res_data and deepseek.client:  # ✅ 仅当豆包失败时使用
+        try:
+            res_data = deepseek.unified_text_chat(prompt_input)
+        except:
+            pass
+```
+
+【关键改动原则】
+1. 将 doubao 检查放在最前面(优先级最高)
+2. 将 deepseek 放在 if not res_data 后面(只当豆包失败才用)
+3. 两个都失败时才返回默认/错误响应
+4. 添加日志标记区分:
+   - [DEBUG] [xxx] Querying Doubao... (豆包主)
+   - [WARNING] [xxx] Doubao failed, trying DeepSeek... (降级)
+   - (fallback) 标记备用
+
+【不需要修改的地方】
+✅ generate_growths_summary() - 已经是豆包优先了
+✅ async_generate_drawing() - 已经是豆包优先了
+
+【环境变量检查】
+确保这些在 Railway 已设置:
+- ARK_API_KEY ✅ (豆包 API key)
+- ARK_AUDIO_MODEL ✅ (豆包模型)
+- DEEPSEEK_API_KEY (可选,仅作备用)
+
+【验证修改成功】
+修改提交部署后,DNS 日志应该显示:
+✅ 大量 api.doubao.com 请求
+❌ 很少或没有 api.deepseek.com 请求(除非豆包故障)
+
+【任务】
+1. 修改 src/business_logic.py 的 3 个位置
+2. 每个位置按上面的修改说明调整 if/else 逻辑
+3. 保留所有的 try/except 和日志输出
+4. 完整输出修改后的 src/business_logic.py 文件
+5. 确保没有语法错误
+
