@@ -53,12 +53,48 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
+    import os
+    import time
+    
+    lock_path = ".db_cleanup.lock"
+    should_run = False
+    
     try:
-        from src.crud import cleanup_zero_vectors_in_db
-        print("[INFO] [STARTUP] Starting database cleanup for zero vectors...")
-        cleanup_zero_vectors_in_db()
-    except Exception as start_err:
-        print(f"[ERROR] [STARTUP] Failed during zero-vector cleanup startup phase: {start_err}")
+        # If the lock file is old (e.g. from a crashed previous run), remove it
+        if os.path.exists(lock_path):
+            try:
+                mtime = os.path.getmtime(lock_path)
+                if time.time() - mtime > 300:
+                    os.remove(lock_path)
+            except Exception:
+                pass
+                
+        # Exclusive creation mode ('x') ensures only one worker succeeds
+        with open(lock_path, "x") as f:
+            f.write(str(time.time()))
+        should_run = True
+    except FileExistsError:
+        should_run = False
+    except Exception as e:
+        # If any other error occurs, default to True to ensure cleanup runs at least once
+        logger.warning(f"[STARTUP] Error acquiring cleanup lock: {e}. Defaulting to run.")
+        should_run = True
+
+    if should_run:
+        try:
+            from src.crud import cleanup_zero_vectors_in_db
+            logger.info("[STARTUP] Starting database cleanup for zero vectors (acquired exclusive lock)...")
+            cleanup_zero_vectors_in_db()
+        except Exception as start_err:
+            logger.error(f"[ERROR] [STARTUP] Failed during zero-vector cleanup startup phase: {start_err}")
+        finally:
+            try:
+                if os.path.exists(lock_path):
+                    os.remove(lock_path)
+            except Exception:
+                pass
+    else:
+        logger.info("[STARTUP] Skipping database cleanup (handled by another primary worker process).")
 
 @app.get("/")
 async def root():
