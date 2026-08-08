@@ -28,12 +28,14 @@ RUN groupadd -g 1000 appgroup && \
     useradd -r -u 1000 -g appgroup -d /app -s /sbin/nologin appuser && \
     chown -R appuser:appgroup /app
 
-# Switch to non-root user for virtual environment creation and dependency installation
-USER appuser
-
-# Create virtual environment and install dependencies
+# Create virtual environment as root first to ensure proper permissions
 RUN python -m venv /app/.venv && \
-    /app/.venv/bin/pip install --no-cache-dir --upgrade pip
+    /app/.venv/bin/pip install --no-cache-dir --upgrade pip && \
+    chmod 755 /app/.venv && \
+    chmod 755 /app/.venv/bin
+
+# Switch to non-root user for dependency installation
+USER appuser
 
 COPY --chown=appuser:appgroup requirements.txt .
 RUN /app/.venv/bin/pip install --no-cache-dir -r requirements.txt
@@ -47,3 +49,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
 CMD ["/app/.venv/bin/python", "app.py"]
+
