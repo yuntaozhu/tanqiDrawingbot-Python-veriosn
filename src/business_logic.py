@@ -7,7 +7,7 @@ from fastapi import HTTPException
 import numpy as np
 
 from src.config import DEEPSEEK_API_KEY, ADMIN_KEY
-from src.cache import DrawingCacheManager
+from src.cache import DrawingCacheManager, LLMCacheManager
 from src.crud import (
     save_history_to_db, save_print_job_to_db, save_psych_vector, 
     query_psych_vectors, get_device_settings
@@ -413,7 +413,15 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
     device_token = device_token or "anonymous_device"
     doubao = DoubaoAPI.get_instance()
     deepseek = DeepSeekAPI.get_instance()
+    llm_cache = LLMCacheManager.get_instance()
     
+    # 0. Check LLM Cache first for Text inputs
+    if isinstance(prompt_input, str):
+        cached_res = llm_cache.get(prompt_input)
+        if cached_res:
+            print(f"[DEBUG] [CACHE] 0ms Cache Hit for LLM Text Input: '{prompt_input}'")
+            return cached_res
+
     # Check if Doubao client is configured
     if doubao.client:
         try:
@@ -424,6 +432,13 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                 stt_start = time.time()
                 user_text = deepseek.transcribe_audio(prompt_input)
                 print(f"[DEBUG] [FAST_PATH] STT took {time.time() - stt_start:.2f}s. Result: '{user_text}'")
+                
+                # Check LLM Cache for transcribed text
+                if user_text:
+                    cached_res = llm_cache.get(user_text)
+                    if cached_res:
+                        print(f"[DEBUG] [CACHE] 0ms Cache Hit for Transcribed Audio: '{user_text}'")
+                        return cached_res
                 
                 if not user_text:
                     res_data = {
@@ -593,11 +608,15 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                         except Exception as fb_err:
                             print(f"[ERROR] [DOUBAO] Fallback generator also failed: {fb_err}")
                 
+                embedding_available = False
                 try:
                     combined_text = f"儿童原句: {user_text}\nAI回复: {text_response}"
                     embedding_vector = doubao.generate_embedding(combined_text)
-                    if not embedding_vector:
+                    if not embedding_vector or embedding_vector == [0.0] * 1024:
                         embedding_vector = [0.0] * 1024
+                        embedding_available = False
+                    else:
+                        embedding_available = True
                         
                     vector_metadata = {
                         "psych_metrics": psych_metrics,
@@ -614,6 +633,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                     )
                 except Exception as vector_err:
                     print(f"[ERROR] [DOUBAO_VECTOR] Embedding/Vector DB write failed: {vector_err}")
+                    embedding_available = False
                 
                 audio_base64 = None
                 if text_response:
@@ -625,12 +645,16 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                         
                 total_duration = time.time() - start_time
                 print(f"[DEBUG] [DOUBAO] Total processing finished in {total_duration:.2f}s")
-                return {
+                return_payload = {
                     "text_response": text_response,
                     "action": action,
                     "audio_base64": audio_base64,
-                    "stt_empty": False if user_text else True
+                    "stt_empty": False if user_text else True,
+                    "embedding_available": embedding_available
                 }
+                if user_text:
+                    llm_cache.set(user_text, return_payload)
+                return return_payload
         except Exception as unified_err:
             print(f"[WARNING] [DOUBAO] Unified pipeline crashed, falling back to standard pipeline: {unified_err}")
  
@@ -664,7 +688,8 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                 "action": None,
                 "audio_base64": audio_base64,
                 "stt_empty": True,
-                "raw_len": input_len
+                "raw_len": input_len,
+                "embedding_available": False
             }
         print(f"[DEBUG] [CORE] Transcribed Text: '{user_text}'")
     else:
@@ -845,11 +870,15 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
         total_duration = time.time() - start_time
         print(f"[DEBUG] [CORE] total processing completed in {total_duration:.2f}s")
             
-        return {
+        return_payload = {
             "text_response": text_response,
             "action": action,
-            "audio_base64": audio_base64
+            "audio_base64": audio_base64,
+            "embedding_available": False
         }
+        if user_text:
+            llm_cache.set(user_text, return_payload)
+        return return_payload
     except Exception as e:
         print(f"[ERROR] [CORE] LLM Handler Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

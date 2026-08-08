@@ -461,6 +461,7 @@ class DoubaoAPI:
         self.draw_model = ARK_DRAW_MODEL
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
         self.async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
+        self._consecutive_embedding_failures = 0
 
     def _local_imaginative_expand(self, prompt: str) -> str:
         import random
@@ -564,6 +565,7 @@ class DoubaoAPI:
                     input=[text]
                 )
                 print(f"[DEBUG] [EMBED] SiliconFlow BAAI/bge-m3 embedding success!")
+                self._consecutive_embedding_failures = 0
                 return response.data[0].embedding
             except Exception as sf_err:
                 print(f"[WARNING] [EMBED] SiliconFlow embedding failed: {sf_err}")
@@ -578,31 +580,61 @@ class DoubaoAPI:
                     input=[text]
                 )
                 print(f"[DEBUG] [EMBED] OpenAI text-embedding-3-small success!")
+                self._consecutive_embedding_failures = 0
                 return response.data[0].embedding
             except Exception as oa_err:
                 print(f"[WARNING] [EMBED] OpenAI embedding failed: {oa_err}")
 
         # 3. Doubao endpoints
-        if self.client:
+        if self.client and self.api_key:
+            # 3a. Multimodal Vision Embedding (Requires dedicated endpoint)
             try:
-                response = self.client.embeddings.create(
-                    model=EMBEDDING_MODEL_VISION,
-                    input=[text]
-                )
-                return response.data[0].embedding
+                url = f"{self.base_url}/embeddings/multimodal"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}"
+                }
+                payload = {
+                    "model": EMBEDDING_MODEL_VISION,
+                    "input": [
+                        {
+                            "type": "text",
+                            "text": text
+                        }
+                    ]
+                }
+                print(f"[DEBUG] [DOUBAO_EMBED] Requesting vision embedding from {url} using {EMBEDDING_MODEL_VISION}...")
+                resp = requests.post(url, json=payload, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    resp_json = resp.json()
+                    embedding = resp_json["data"][0]["embedding"]
+                    print(f"[DEBUG] [DOUBAO_EMBED] Vision embedding success!")
+                    self._consecutive_embedding_failures = 0
+                    return embedding
+                else:
+                    print(f"[ERROR] [DOUBAO_EMBED] Vision embedding HTTP error {resp.status_code}: {resp.text}")
+                    raise RuntimeError(f"HTTP error {resp.status_code}: {resp.text}")
             except Exception as e:
-                print(f"[ERROR] [DOUBAO_EMBED] Vision embedding failed, trying text embedding: {e}")
+                print(f"[ERROR] [DOUBAO_EMBED] Vision embedding failed: {e}. Falling back to Doubao text embedding...")
+                # 3b. Standard Text Embedding
                 try:
+                    print(f"[DEBUG] [DOUBAO_EMBED] Requesting text embedding with {EMBEDDING_MODEL_TEXT}...")
                     response = self.client.embeddings.create(
                         model=EMBEDDING_MODEL_TEXT,
                         input=[text]
                     )
+                    print(f"[DEBUG] [DOUBAO_EMBED] Text embedding success!")
+                    self._consecutive_embedding_failures = 0
                     return response.data[0].embedding
                 except Exception as e2:
                     print(f"[ERROR] [DOUBAO_EMBED] Text embedding also failed: {e2}")
 
         # 4. Pure fallback to dummy embedding to prevent crash/latency
-        print("[WARNING] [EMBED] All embedding methods failed or were not configured. Returning dummy zero vector.")
+        self._consecutive_embedding_failures = getattr(self, "_consecutive_embedding_failures", 0) + 1
+        print(f"[CRITICAL_ALERT] [EMBED_DEGRADED] Embedding failure detected! (Consecutive failures: {self._consecutive_embedding_failures})")
+        if self._consecutive_embedding_failures >= 5:
+            print("[OPERATIONS_ALERT] [MONITORING] Embedding degradation has persisted for more than 5 consecutive requests. Please check API credentials and endpoint availability immediately!")
+        
         return [0.0] * 1024
 
     @retry_with_backoff(max_retries=2)
@@ -988,6 +1020,7 @@ class VoiceInteractionService:
 
     def __init__(self):
         self._buffers = {}  # Dict[str, io.BytesIO]
+        self._last_logged_size = {}  # Dict[str, int]
 
     def get_buffer(self, device_token: str) -> io.BytesIO:
         if device_token not in self._buffers:
@@ -996,13 +1029,26 @@ class VoiceInteractionService:
 
     def clear_buffer(self, device_token: str):
         self._buffers[device_token] = io.BytesIO()
+        self._last_logged_size[device_token] = 0
 
     def append_chunk(self, device_token: str, chunk: bytes):
         buf = self.get_buffer(device_token)
+        is_first = buf.tell() == 0
         buf.write(chunk)
-        print(f"[DEBUG] [VoiceInteractionService] Appended {len(chunk)} bytes. Current size: {buf.tell()} bytes")
+        
+        current_size = buf.tell()
+        last_size = self._last_logged_size.get(device_token, 0)
+        
+        if is_first:
+            print(f"[DEBUG] [VoiceInteractionService] Started buffering voice stream for token {device_token[:5]}***. First chunk: {len(chunk)} bytes.")
+            self._last_logged_size[device_token] = current_size
+        elif current_size - last_size >= 512 * 1024:
+            print(f"[DEBUG] [VoiceInteractionService] Buffered {current_size} bytes total (passed 512KB milestone) for token {device_token[:5]}***.")
+            self._last_logged_size[device_token] = current_size
 
     def get_full_audio(self, device_token: str) -> bytes:
         buf = self.get_buffer(device_token)
-        return buf.getvalue()
+        data = buf.getvalue()
+        print(f"[DEBUG] [VoiceInteractionService] Finished buffering. Total size compiled: {len(data)} bytes for token {device_token[:5]}***.")
+        return data
 
