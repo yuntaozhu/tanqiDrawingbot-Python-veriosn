@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.github/
+.env
+app_history.db
+node_modules/
+bun.lock
+package-lock.json

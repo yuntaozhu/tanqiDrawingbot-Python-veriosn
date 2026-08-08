@@ -23,23 +23,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Create non-root user (uid 1000) for security
-RUN groupadd -g 1000 appgroup && \
-    useradd -r -u 1000 -g appgroup -d /app -s /sbin/nologin appuser && \
-    chown -R appuser:appgroup /app
-
-# Switch to non-root user for virtual environment creation and dependency installation
-USER appuser
-
-# Create virtual environment and install dependencies
+# Create virtual environment and install dependencies as root
 RUN python -m venv /app/.venv && \
     /app/.venv/bin/pip install --no-cache-dir --upgrade pip
 
-COPY --chown=appuser:appgroup requirements.txt .
+COPY requirements.txt .
 RUN /app/.venv/bin/pip install --no-cache-dir -r requirements.txt
 
-# Copy application source code
-COPY --chown=appuser:appgroup . .
+# Copy application source code (excluding items matched by .dockerignore)
+COPY . .
+
+# Create non-root user (uid 1000) for security
+RUN groupadd -g 1000 appgroup && \
+    useradd -r -u 1000 -g appgroup -d /app -s /sbin/nologin appuser
+
+# Set perfect execution and ownership permissions for all files and virtual environment binaries
+RUN chmod -R 755 /app/.venv && \
+    chown -R appuser:appgroup /app
+
+# Switch to non-root user for execution
+USER appuser
 
 EXPOSE 3000
 
