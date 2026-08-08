@@ -45,8 +45,8 @@ if REPLICATE_API_TOKEN:
 IDEOGRAM_API_KEY = os.getenv("IDEOGRAM_API_KEY")
 
 ARK_API_KEY = os.getenv("ARK_API_KEY", "05a5b825-69f6-40ff-93e9-7493c05e4fb0")
-ARK_AUDIO_MODEL = os.getenv("ARK_AUDIO_MODEL", "doubao-seed-2.0-lite-260428")
-ARK_DRAW_MODEL = os.getenv("ARK_DRAW_MODEL", "doubao-seedream-5.0-pro-260628")
-ARK_TTS_MODEL = os.getenv("ARK_TTS_MODEL", "Doubao-Seed-VoiceDesign-1.0")
+ARK_AUDIO_MODEL = os.getenv("ARK_AUDIO_MODEL", "doubao-seed-2-0-lite-260428")
+ARK_DRAW_MODEL = os.getenv("ARK_DRAW_MODEL", "doubao-seedream-5-0-pro-260628")
+ARK_TTS_MODEL = os.getenv("ARK_TTS_MODEL", "Doubao-Seed-VoiceDesign-1-0")
 EMBEDDING_MODEL_VISION = os.getenv("EMBEDDING_MODEL_VISION", "doubao-embedding-vision-250615")
 EMBEDDING_MODEL_TEXT = os.getenv("EMBEDDING_MODEL_TEXT", "doubao-embedding-text-250515")
