@@ -8,7 +8,9 @@ PORT = int(os.getenv("PORT", "3000"))
 ADMIN_KEY = os.getenv("ADMIN_KEY")
 
 # DB URL
-DATABASE_URL = "sqlite:///./app_history.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app_history.db")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 # API Keys and endpoints
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") or os.getenv("API_KEY")

@@ -358,6 +358,112 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
     return None
 
 
+async def async_generate_drawing_with_fusion(
+    fused_prompt: str, 
+    device_token: str, 
+    fusion_result: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """
+    Generates drawing line art asynchronously using fused_prompt and persists history.
+    """
+    print(f"[DEBUG] [ASYNC_DRAW] Using fused prompt: {fused_prompt[:100]}...")
+    start_time = time.time()
+    
+    cache_mgr = DrawingCacheManager.get_instance()
+    cached = cache_mgr.get(fused_prompt)
+    if cached:
+        print(f"[DEBUG] [ASYNC_DRAW] Cache Hit for fused prompt: '{fused_prompt}'")
+        job_id = str(uuid.uuid4())
+        save_print_job_to_db({
+            "job_id": job_id,
+            "image_url": cached.get("image_url"),
+            "bitmap_hex": cached.get("bitmap_hex"),
+            "prompt": fusion_result.get("target_element") or fused_prompt,
+            "timestamp": time.time()
+        })
+        
+        from src.conversation_crud import ConversationManager
+        ConversationManager.save_drawing_record(
+            job_id=job_id,
+            device_token=device_token,
+            operation_type=fusion_result.get("operation"),
+            scene_prompt=fused_prompt,
+            image_url=cached.get("image_url")
+        )
+        
+        return {
+            "type": "draw",
+            "prompt": fusion_result.get("target_element"),
+            "fused_prompt": fused_prompt,
+            "operation": fusion_result.get("operation"),
+            "scene_elements": fusion_result.get("all_elements_after"),
+            "job_id": job_id,
+            "image_url": cached.get("image_url"),
+            "bitmap_hex": cached.get("bitmap_hex")
+        }
+
+    def _generate_sync():
+        try:
+            doubao = DoubaoAPI.get_instance()
+            if doubao.client:
+                try:
+                    urls = doubao.generate_image(fused_prompt)
+                    if urls:
+                        processed_image, bitmap_hex = process_line_art_and_bitmap(urls[0])
+                        return processed_image, bitmap_hex
+                except Exception as e:
+                    print(f"[WARNING] [ASYNC_DRAW] Doubao Seedream image generation failed: {e}")
+
+            result = generate_image_with_fallback(fused_prompt)
+            urls = result.get("urls")
+            if urls:
+                processed_image, bitmap_hex = process_line_art_and_bitmap(urls[0])
+                return processed_image, bitmap_hex
+        except Exception as e:
+            print(f"[ERROR] [ASYNC_DRAW] Image generation with fusion failed: {e}")
+        return None, None
+
+    processed_image, bitmap_hex = await asyncio.to_thread(_generate_sync)
+
+    if processed_image:
+        job_id = str(uuid.uuid4())
+        save_print_job_to_db({
+            "job_id": job_id,
+            "image_url": processed_image,
+            "bitmap_hex": bitmap_hex,
+            "prompt": fusion_result.get("target_element") or fused_prompt,
+            "timestamp": time.time()
+        })
+
+        from src.conversation_crud import ConversationManager
+        ConversationManager.save_drawing_record(
+            job_id=job_id,
+            device_token=device_token,
+            operation_type=fusion_result.get("operation"),
+            scene_prompt=fused_prompt,
+            image_url=processed_image
+        )
+
+        action = {
+            "type": "draw",
+            "prompt": fusion_result.get("target_element"),
+            "fused_prompt": fused_prompt,
+            "operation": fusion_result.get("operation"),
+            "scene_elements": fusion_result.get("all_elements_after"),
+            "job_id": job_id,
+            "image_url": processed_image,
+            "bitmap_hex": bitmap_hex
+        }
+
+        cache_mgr.set(fused_prompt, action)
+
+        duration = time.time() - start_time
+        print(f"[DEBUG] [ASYNC_DRAW] Image generated with fusion and cached in {duration:.2f}s, job_id: {job_id}")
+        return action
+
+    return None
+
+
 async def stream_chat_llm(user_text: str):
     """Streams chat tokens from Doubao or fallback provider using async client."""
     doubao = DoubaoAPI.get_instance()

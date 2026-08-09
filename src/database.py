@@ -5,7 +5,10 @@ from sqlalchemy.exc import DatabaseError
 import os
 from src.config import DATABASE_URL
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -14,6 +17,7 @@ Base = declarative_base()
 from src.models import (
     GenerationHistoryDB, FeedbackDB, PrintJobDB, PsychVectorDB, DeviceSettingsDB
 )
+from src.conversation_models import ConversationContext, DrawingHistory
 
 try:
     Base.metadata.create_all(bind=engine)

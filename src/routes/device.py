@@ -11,10 +11,13 @@ from src.config import DEEPSEEK_API_KEY
 from src.crud import get_print_jobs_from_db, delete_print_job_from_db, save_print_job_to_db
 from src.services import VoiceInteractionService, DeepSeekAPI
 from src.business_logic import (
-    process_llm_interaction, stream_chat_llm, async_generate_drawing, extract_drawing_subject
+    process_llm_interaction, stream_chat_llm, async_generate_drawing, extract_drawing_subject, async_generate_drawing_with_fusion
 )
 from src.cache import DrawingCacheManager
 from src.logger import setup_logger
+from src.conversation_crud import ConversationManager
+from src.operation_recognizer import OperationRecognizer
+from src.prompt_fusion import PromptFusionEngine, ConversationContextManager
 
 logger = setup_logger("routes.device")
 router = APIRouter()
@@ -37,28 +40,79 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
     async def event_generator():
-        drawing_keywords = ["画", "画画", "画一个", "画一只", "画一架", "画辆", "画朵", "画条", "画张", "画一幅", "画个", "画出", "画一画", "想要画", "帮我画", "可以画"]
+        # Load or create conversation context
+        logger.debug(f"[INTEGRATION] Loading context for token: {token}")
+        context = ConversationManager.get_conversation_context(token)
+        if context is None:
+            context = {
+                "device_token": token,
+                "message_history": [],
+                "current_image_url": None,
+                "current_image_bitmap_hex": None,
+                "scene_elements": [],
+                "last_generated_prompt": None,
+                "last_operation_type": None,
+                "last_operation_detail": {},
+                "created_at": None,
+                "updated_at": None
+            }
+            logger.debug(f"[INTEGRATION] Created new context for token: {token}")
+        else:
+            logger.debug(f"[INTEGRATION] Loaded existing context for token: {token}")
+            logger.debug(f"[INTEGRATION] Current scene elements: {context.get('scene_elements', [])}")
+            logger.debug(f"[INTEGRATION] Message history count: {len(context.get('message_history', []))}")
+
+        drawing_keywords = [
+            "画", "画画", "画一个", "画一只", "画一架", "画辆", "画朵", "画条", "画张", "画一幅", 
+            "画个", "画出", "画一画", "想要画", "帮我画", "可以画", 
+            "增加", "加一个", "加个", "添一个", "多一个", "再画", "旁边加", "添加", "加上", 
+            "去掉", "擦掉", "删除", "不要", "变成", "改色"
+        ]
         user_text_lower = user_text.lower()
         should_draw = any(kw in user_text_lower for kw in drawing_keywords)
 
         drawing_task = None
         action_result = None
+        fusion_result = {}
+        operation = {"type": "create", "confidence": 1.0}
 
         if should_draw:
-            subject = extract_drawing_subject(user_text)
-            if not subject or subject in ["画", "画画", "画图", "一幅画", "一幅", "画个"]:
-                subject = "小猫"
+            logger.debug(f"[INTEGRATION] Preparing fusion for prompt: {user_text}")
+            fusion_inputs = ConversationContextManager.prepare_fusion_inputs(user_text, context)
+            operation = fusion_inputs["operation"]
+            logger.debug(f"[INTEGRATION] Recognized operation: {operation['type']} (confidence: {operation['confidence']})")
+            
+            # If confidence is low (< 0.5), we downgrade to create or fallback to simple subject extraction
+            if operation.get("confidence", 0.0) < 0.5:
+                operation["type"] = "create"
 
-            logger.debug(f"[CHAT_SSE] Drawing request detected for prompt: '{subject}'")
-            # 0ms Redis / Memory Cache Check
+            fusion_result = PromptFusionEngine.fuse_drawing_prompt(
+                current_user_text=user_text,
+                operation_type=operation["type"],
+                previous_prompt=fusion_inputs["previous_prompt"],
+                scene_elements=fusion_inputs["scene_elements"]
+            )
+
+            logger.debug(f"[INTEGRATION] Fusion complete:")
+            logger.debug(f"  - Fused Prompt: {fusion_result.get('fused_prompt', '')[:100]}...")
+            logger.debug(f"  - Target Element: {fusion_result.get('target_element')}")
+            logger.debug(f"  - All Elements After: {fusion_result.get('all_elements_after', [])}")
+
+            drawing_prompt = fusion_result.get("fused_prompt", user_text)
+            subject = fusion_result.get("target_element") or extract_drawing_subject(user_text) or "可爱"
+            
+            # Check Cache (using fused_prompt as cache key)
             cache_mgr = DrawingCacheManager.get_instance()
-            cached_action = cache_mgr.get(subject)
+            cached_action = cache_mgr.get(drawing_prompt)
             if cached_action:
-                logger.debug(f"[CHAT_SSE] 0ms Cache Hit for prompt: '{subject}'")
+                logger.debug(f"[INTEGRATION] Cache hit for fused prompt: {drawing_prompt[:100]}")
                 job_id = str(uuid.uuid4())
                 action_result = {
                     "type": "draw",
                     "prompt": subject,
+                    "fused_prompt": drawing_prompt,
+                    "operation": operation["type"],
+                    "scene_elements": fusion_result.get("all_elements_after"),
                     "job_id": job_id,
                     "image_url": cached_action.get("image_url"),
                     "bitmap_hex": cached_action.get("bitmap_hex")
@@ -70,14 +124,26 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
                     "prompt": subject,
                     "timestamp": time.time()
                 })
+                # Save to DrawingHistory in DB
+                ConversationManager.save_drawing_record(
+                    job_id=job_id,
+                    device_token=token,
+                    operation_type=operation["type"],
+                    scene_prompt=drawing_prompt,
+                    image_url=cached_action.get("image_url")
+                )
             else:
-                logger.debug(f"[CHAT_SSE] Launching async parallel drawing task for prompt: '{subject}'")
-                drawing_task = asyncio.create_task(async_generate_drawing(subject, token))
+                logger.debug(f"[INTEGRATION] Cache miss, launching async draw task")
+                drawing_task = asyncio.create_task(
+                    async_generate_drawing_with_fusion(drawing_prompt, token, fusion_result)
+                )
 
         # Stream LLM text output token-by-token
+        ai_response_text = ""
         try:
             async for chunk in stream_chat_llm(user_text):
                 safe_chunk = chunk.replace("\n", " ")
+                ai_response_text += chunk
                 yield f"data: {safe_chunk}\n\n"
         except Exception as stream_err:
             logger.error(f"[CHAT_SSE] Text streaming error: {stream_err}")
@@ -98,9 +164,53 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
                 logger.error(f"[CHAT_SSE] Async drawing task error: {task_err}")
                 action_result = None
 
+        # Update and save context
+        img_url = action_result.get("image_url") if action_result else None
+        bmp_hex = action_result.get("bitmap_hex") if action_result else None
+
+        # Deepcopy or update context local var
+        updated_ctx = dict(context)
+        if should_draw and fusion_result:
+            updated_ctx = ConversationContextManager.update_context_after_fusion(
+                updated_ctx,
+                fusion_result,
+                image_url=img_url,
+                bitmap_hex=bmp_hex
+            )
+
+        # Append to message history list
+        message = {
+            "timestamp": time.time(),
+            "user_text": user_text,
+            "ai_response": ai_response_text,
+            "drawing_triggered": should_draw,
+            "drawing_config": fusion_result if should_draw else None,
+            "operation_type": operation["type"] if should_draw else None,
+            "metadata": {
+                "recognition_confidence": operation.get("confidence", 0),
+                "scene_elements_after": updated_ctx.get("scene_elements", [])
+            }
+        }
+        
+        # Ensure we don't modify a shared default list
+        history_list = list(updated_ctx.get("message_history", []))
+        history_list.append(message)
+        updated_ctx["message_history"] = history_list
+
+        # Save context to DB
+        success = ConversationManager.create_or_update_conversation_context(token, updated_ctx)
+        if success:
+            logger.info(f"[INTEGRATION] ✅ Saved updated context in database")
+        else:
+            logger.error(f"[INTEGRATION] ❌ Failed to save context in database")
+
         # Yield final action payload in the last SSE data frame
         final_payload = {
-            "action": action_result
+            "action": action_result,
+            "context": {
+                "scene_elements": updated_ctx.get("scene_elements", []),
+                "message_count": len(updated_ctx.get("message_history", []))
+            }
         }
         yield f"data: {json.dumps(final_payload, ensure_ascii=False)}\n\n"
 
@@ -283,5 +393,50 @@ async def tts_get_endpoint(
     except Exception as e:
         logger.error(f"[TTS GET] Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"TTS GET Error: {str(e)}")
+
+
+@router.get("/api/device/v1/conversation-history")
+@router.get("/api/v1/conversation-history")
+async def get_conversation_history(
+    request: Request,
+    limit: int = Query(20, ge=1, le=100)
+):
+    token = request.headers.get("x-device-token") or request.headers.get("authorization") or "anonymous_device"
+    logger.debug(f"[API] Loading history for token: {token}")
+    
+    context = ConversationManager.get_conversation_context(token)
+    if not context:
+        return {
+            "device_token": token,
+            "scene_elements": [],
+            "messages": []
+        }
+        
+    messages = context.get("message_history", [])
+    if limit:
+        messages = messages[-limit:]
+        
+    return {
+        "device_token": token,
+        "scene_elements": context.get("scene_elements", []),
+        "messages": messages
+    }
+
+
+@router.post("/api/device/v1/conversation-reset")
+@router.post("/api/v1/conversation-reset")
+async def reset_conversation(request: Request):
+    token = request.headers.get("x-device-token") or request.headers.get("authorization") or "anonymous_device"
+    logger.debug(f"[API] Resetting conversation for token: {token}")
+    
+    success = ConversationManager.delete_conversation_context(token, soft_delete=True)
+    if success:
+        return {
+            "success": True,
+            "message": "Conversation reset successfully",
+            "device_token": token
+        }
+    else:
+        raise HTTPException(status_code=500, detail="Failed to reset conversation context")
 
 
