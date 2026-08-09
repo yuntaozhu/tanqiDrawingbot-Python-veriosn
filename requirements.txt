@@ -10,4 +10,5 @@ scipy
 replicate
 openai
 sqlalchemy
+psycopg2-binary
 redis
