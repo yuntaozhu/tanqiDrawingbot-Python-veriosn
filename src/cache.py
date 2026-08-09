@@ -81,9 +81,19 @@ class DrawingCacheManager:
 
         # 3. Memory cache partial match
         for k, val in self.memory_cache.items():
+            # Avoid partial matching with very short keys (e.g. "猫", "狗") to prevent false hits
+            if len(k) < 3 or len(norm_key) < 3:
+                continue
+            
+            # If one is a substring of the other, ensure they are comparable in length or highly specific
             if k in norm_key or norm_key in k:
-                print(f"[DEBUG] [CACHE] Memory partial hit for drawing: '{norm_key}' -> '{k}'")
-                return val
+                shorter_len = min(len(k), len(norm_key))
+                longer_len = max(len(k), len(norm_key))
+                # Suffixes/prefixes can match if they represent at least 60% of the text,
+                # or if the matched substring is at least 5 characters long (highly specific)
+                if shorter_len >= 5 or (shorter_len / longer_len) >= 0.6:
+                    print(f"[DEBUG] [CACHE] Memory partial hit for drawing: '{norm_key}' -> '{k}'")
+                    return val
 
         return None
 
