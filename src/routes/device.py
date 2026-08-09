@@ -92,6 +92,9 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
                 previous_prompt=fusion_inputs["previous_prompt"],
                 scene_elements=fusion_inputs["scene_elements"]
             )
+            
+            # Sync the final operation type (in case it was downgraded/adjusted by the fusion engine)
+            operation["type"] = fusion_result.get("operation", operation["type"])
 
             logger.debug(f"[INTEGRATION] Fusion complete:")
             logger.debug(f"  - Fused Prompt: {fusion_result.get('fused_prompt', '')[:100]}...")

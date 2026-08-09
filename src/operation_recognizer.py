@@ -26,7 +26,7 @@ class OperationRecognizer:
                 }
 
         # 2. MODIFY operation keywords detection
-        modify_keywords = ["改成", "修改", "变成", "改色", "换成", "变", "改一下", "把"]
+        modify_keywords = ["改成", "修改", "变成", "改色", "换成", "改一下"]
         for kw in modify_keywords:
             if kw in text:
                 # E.g. "把小狗的颜色改成白色" -> target: "小狗"

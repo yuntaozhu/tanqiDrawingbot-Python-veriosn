@@ -15,6 +15,11 @@ class PromptFusionEngine:
         """
         scene_elements = scene_elements or []
         
+        # Check if previous context exists
+        has_context = bool(previous_prompt) or len(scene_elements) > 0
+        if operation_type in ["add", "modify", "remove"] and not has_context:
+            operation_type = "create"
+
         # Recognize operation to extract targets
         op_info = OperationRecognizer.recognize_operation(current_user_text)
         target = op_info.get("raw_target") or current_user_text
