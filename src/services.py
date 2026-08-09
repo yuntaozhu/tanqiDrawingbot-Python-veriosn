@@ -465,8 +465,9 @@ class DoubaoAPI:
 
     def _local_imaginative_expand(self, prompt: str) -> str:
         import random
-        # If the user prompt is already detailed or contains actions, keep it intact to respect their imagination
-        if len(prompt) > 8:
+        # If the user prompt is already detailed or contains actions/vague references, keep it intact to respect their imagination
+        vague_patterns = ["这个", "那个", "画面", "画出来", "保存", "把", "它", "是的"]
+        if len(prompt) > 5 or any(p in prompt for p in vague_patterns):
             return prompt
         
         scenarios = [

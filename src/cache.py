@@ -102,6 +102,12 @@ class DrawingCacheManager:
         if not norm_key or not data:
             return
 
+        # Avoid caching vague or extremely generic/functional prompts, as they pollute cache
+        vague_patterns = ["这个", "那个", "画面", "画出来", "保存", "把", "它", "是的", "画一下"]
+        if len(norm_key) < 5 or any(p in norm_key for p in vague_patterns):
+            print(f"[DEBUG] [CACHE] Skipping cache save for vague prompt: '{norm_key}'")
+            return
+
         if self.redis_client:
             try:
                 self.redis_client.set(f"drawing:{norm_key}", json.dumps(data, ensure_ascii=False))
