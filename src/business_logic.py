@@ -327,7 +327,14 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
             print(f"[ERROR] [ASYNC_DRAW] Image generation failed: {e}")
         return None, None, subject
 
-    processed_image, bitmap_hex, prompt = await asyncio.to_thread(_generate_sync)
+    try:
+        processed_image, bitmap_hex, prompt = await asyncio.wait_for(
+            asyncio.to_thread(_generate_sync),
+            timeout=15.0
+        )
+    except asyncio.TimeoutError:
+        print(f"[ERROR] [ASYNC_DRAW] Image generation timed out after 15s")
+        processed_image, bitmap_hex, prompt = None, None, subject
 
     if processed_image:
         job_id = str(uuid.uuid4())
@@ -423,7 +430,14 @@ async def async_generate_drawing_with_fusion(
             print(f"[ERROR] [ASYNC_DRAW] Image generation with fusion failed: {e}")
         return None, None
 
-    processed_image, bitmap_hex = await asyncio.to_thread(_generate_sync)
+    try:
+        processed_image, bitmap_hex = await asyncio.wait_for(
+            asyncio.to_thread(_generate_sync),
+            timeout=15.0
+        )
+    except asyncio.TimeoutError:
+        print(f"[ERROR] [ASYNC_DRAW] Image generation with fusion timed out after 15s")
+        processed_image, bitmap_hex = None, None
 
     if processed_image:
         job_id = str(uuid.uuid4())

@@ -22,6 +22,27 @@ from src.prompt_fusion import PromptFusionEngine, ConversationContextManager
 logger = setup_logger("routes.device")
 router = APIRouter()
 
+async def timeout_generator(gen, limit=20.0):
+    try:
+        start = time.time()
+        iterator = gen.__aiter__()
+        while True:
+            elapsed = time.time() - start
+            remaining = limit - elapsed
+            if remaining <= 0:
+                logger.warning("[CHAT_SSE] Total event generator timeout exceeded!")
+                break
+            try:
+                item = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+                yield item
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                logger.warning("[CHAT_SSE] Timeout waiting for next SSE chunk!")
+                break
+    except Exception as e:
+        logger.error(f"[CHAT_SSE] Generator error: {e}")
+
 @router.post("/api/device/v1/chat")
 @router.post("/api/v1/chat")
 async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool] = Query(True)):
@@ -154,14 +175,21 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
         # Wait for parallel drawing generation if triggered
         if drawing_task:
             try:
-                while not drawing_task.done():
+                wait_seconds = 0
+                max_wait_seconds = 15
+                while not drawing_task.done() and wait_seconds < max_wait_seconds:
                     try:
                         action_result = await asyncio.wait_for(asyncio.shield(drawing_task), timeout=1.0)
                         break
                     except asyncio.TimeoutError:
+                        wait_seconds += 1
                         # Yield an SSE comment heartbeat to keep connection alive and reset idle proxies
                         yield ": heartbeat\n\n"
-                if drawing_task.done():
+                if not drawing_task.done():
+                    logger.warning("[CHAT_SSE] Drawing task exceeded max wait time, cancelling...")
+                    drawing_task.cancel()
+                    action_result = None
+                else:
                     action_result = drawing_task.result()
             except Exception as task_err:
                 logger.error(f"[CHAT_SSE] Async drawing task error: {task_err}")
@@ -218,7 +246,7 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
         yield f"data: {json.dumps(final_payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
-        event_generator(),
+        timeout_generator(event_generator(), limit=20.0),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

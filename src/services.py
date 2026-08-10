@@ -131,6 +131,7 @@ class DeepSeekAPI:
             kwargs = {
                 "model": "deepseek-chat",
                 "messages": messages,
+                "timeout": 15
             }
             if tools:
                 kwargs["tools"] = tools
@@ -180,7 +181,7 @@ class DeepSeekAPI:
                     {"role": "user", "content": text_prompt}
                 ],
                 response_format={"type": "json_object"},
-                timeout=20
+                timeout=15
             )
             content = response.choices[0].message.content
             print(f"[DEBUG] [DEEPSEEK_TEXT] Raw response: '{content}'")
@@ -292,7 +293,7 @@ class DeepSeekAPI:
                     model=model_name, 
                     file=audio_file,
                     language="zh",
-                    timeout=25
+                    timeout=15
                 )
                 
                 duration = time.time() - start_time
@@ -404,7 +405,7 @@ class DeepSeekAPI:
                     model=model_name,
                     voice=current_voice,
                     input=text,
-                    timeout=20
+                    timeout=15
                 )
                 duration = time.time() - start_time
                 base64_data = base64.b64encode(response.content).decode('utf-8')
@@ -557,7 +558,8 @@ class DoubaoAPI:
                     "optimize_prompt_options": {
                         "mode": "fast"  # fast mode is highly optimized for ultra low latency / high speed
                     }
-                }
+                },
+                timeout=15
             )
             urls = [item.url for item in response.data]
             print(f"[DEBUG] [DOUBAO_DRAW] Success! Generated URL: {urls[0] if urls else 'None'}")
@@ -587,7 +589,8 @@ class DoubaoAPI:
                 sf_client = OpenAI(api_key=SILICONFLOW_API_KEY, base_url="https://api.siliconflow.cn/v1")
                 response = sf_client.embeddings.create(
                     model="BAAI/bge-m3",
-                    input=[text]
+                    input=[text],
+                    timeout=10
                 )
                 print(f"[DEBUG] [EMBED] SiliconFlow BAAI/bge-m3 embedding success!")
                 self._consecutive_embedding_failures = 0
@@ -602,7 +605,8 @@ class DoubaoAPI:
                 oa_client = OpenAI(api_key=OPENAI_API_KEY)
                 response = oa_client.embeddings.create(
                     model="text-embedding-3-small",
-                    input=[text]
+                    input=[text],
+                    timeout=10
                 )
                 print(f"[DEBUG] [EMBED] OpenAI text-embedding-3-small success!")
                 self._consecutive_embedding_failures = 0
@@ -646,7 +650,8 @@ class DoubaoAPI:
                     print(f"[DEBUG] [DOUBAO_EMBED] Requesting text embedding with {EMBEDDING_MODEL_TEXT}...")
                     response = self.client.embeddings.create(
                         model=EMBEDDING_MODEL_TEXT,
-                        input=[text]
+                        input=[text],
+                        timeout=10
                     )
                     print(f"[DEBUG] [DOUBAO_EMBED] Text embedding success!")
                     self._consecutive_embedding_failures = 0
@@ -715,7 +720,7 @@ class DoubaoAPI:
                         ]
                     }
                 ],
-                timeout=50
+                timeout=15
             )
             content = response.choices[0].message.content
             print(f"[DEBUG] [DOUBAO_AUDIO] Raw response: '{content}'")
@@ -763,7 +768,7 @@ class DoubaoAPI:
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": text_prompt}
                 ],
-                timeout=50
+                timeout=15
             )
             content = response.choices[0].message.content
             print(f"[DEBUG] [DOUBAO_TEXT] Raw response: '{content}'")
@@ -922,7 +927,7 @@ class IdeogramAPI:
                 print(f"Failed to attach reference image: {e}")
                 
         if files:
-            response = requests.post(url, headers=headers, data=data, files=files, timeout=30)
+            response = requests.post(url, headers=headers, data=data, files=files, timeout=15)
         else:
             headers["Content-Type"] = "application/json"
             json_data = {
@@ -938,7 +943,7 @@ class IdeogramAPI:
             if seed is not None:
                 json_data["image_request"]["seed"] = seed
                 
-            response = requests.post(url, headers=headers, json=json_data, timeout=30)
+            response = requests.post(url, headers=headers, json=json_data, timeout=15)
             
         if response.status_code == 200:
             result = response.json()

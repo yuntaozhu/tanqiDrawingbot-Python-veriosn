@@ -53,94 +53,81 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    import os
     import asyncio
+    import logging
+    import os
+    import sys
+    import urllib.request
     
-    # Run all startup tasks in a non-blocking background task.
-    # This prevents blocking Uvicorn's startup sequence and ensures
-    # the server binds to port 3000 and starts accepting requests immediately.
+    logger = logging.getLogger("uvicorn")
+    
     async def run_startup_tasks_background():
-        import os
-        import time
-        import logging
-        
-        logger = logging.getLogger("uvicorn")
-        lock_path = ".startup.lock"
-        my_pid = os.getpid()
-        
-        # 1. Acquire process-safe lock with active PID checking
-        acquired_lock = False
         try:
-            if os.path.exists(lock_path):
-                try:
-                    with open(lock_path, "r") as f:
-                        content = f.read().strip()
-                    if content:
-                        existing_pid = int(content)
-                        # Check if the process holding the lock is still alive
-                        try:
-                            os.kill(existing_pid, 0)
-                            is_alive = True
-                        except OSError:
-                            is_alive = False
-                        
-                        if is_alive:
-                            logger.info(f"[STARTUP] [PID {my_pid}] Startup tasks already being handled by active worker PID {existing_pid}. Skipping.")
-                            return
-                        else:
-                            logger.warning(f"[STARTUP] [PID {my_pid}] Found stale startup lock from dead PID {existing_pid}. Removing stale lock.")
-                            try:
-                                os.remove(lock_path)
-                            except Exception:
-                                pass
-                except Exception as check_err:
-                    logger.warning(f"[STARTUP] [PID {my_pid}] Error checking existing lock file: {check_err}")
+            logger.info("[STARTUP] Starting background database initialization...")
+            from src.database import initialize_db_schema
+            loop = asyncio.get_running_loop()
             
-            # Atomic creation of the lock file
-            with open(lock_path, "x") as f:
-                f.write(str(my_pid))
-            acquired_lock = True
-        except FileExistsError:
-            logger.info(f"[STARTUP] [PID {my_pid}] Another worker process acquired the lock. Skipping.")
-            return
-        except Exception as e:
-            logger.error(f"[STARTUP] [PID {my_pid}] Error acquiring startup lock: {e}. Defaulting to run to ensure startup happens.")
-            acquired_lock = True # Fallback to run if there is some weird filesystem error
+            # 1. Run database schema initialization with 5s timeout
+            await asyncio.wait_for(
+                loop.run_in_executor(None, initialize_db_schema),
+                timeout=5.0
+            )
+            logger.info("[STARTUP] Database schema initialized successfully.")
             
-        if acquired_lock:
-            logger.info(f"[STARTUP] [PID {my_pid}] Acquired exclusive startup lock. Running tasks...")
+            # 2. Run zero-vector cleanup with 5s timeout
+            logger.info("[STARTUP] Starting database zero-vector cleanup...")
+            from src.crud import cleanup_zero_vectors_in_db
+            await asyncio.wait_for(
+                loop.run_in_executor(None, cleanup_zero_vectors_in_db),
+                timeout=5.0
+            )
+            logger.info("[STARTUP] Database cleanup completed.")
+            
+        except asyncio.TimeoutError:
+            logger.warning("[STARTUP] Background startup task timed out!")
+        except Exception as task_err:
+            logger.error(f"[STARTUP] Error during background startup tasks: {task_err}")
+
+    async def start_self_monitor():
+        port = int(os.getenv("PORT", 3000))
+        url = f"http://127.0.0.1:{port}/health"
+        failed_checks = 0
+        
+        # Wait a few seconds initially for the server to start listening
+        await asyncio.sleep(5)
+        logger.info(f"[MONITOR] Self-monitoring started. Checking: {url}")
+        
+        while True:
+            await asyncio.sleep(30)
             try:
-                # 2. Initialize database schema (MUST SUCCEED)
-                logger.info(f"[STARTUP] [PID {my_pid}] Initializing database schema...")
-                from src.database import initialize_db_schema
                 loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, initialize_db_schema)
-                logger.info(f"[STARTUP] [PID {my_pid}] Database schema initialized successfully.")
+                def check():
+                    try:
+                        with urllib.request.urlopen(url, timeout=3) as response:
+                            return response.getcode() == 200
+                    except Exception:
+                        return False
                 
-                # 3. Start cleanup task
-                from src.crud import cleanup_zero_vectors_in_db
-                logger.info(f"[STARTUP] [PID {my_pid}] Starting database cleanup for zero vectors...")
-                await loop.run_in_executor(None, cleanup_zero_vectors_in_db)
-                logger.info(f"[STARTUP] [PID {my_pid}] Database cleanup completed.")
+                healthy = await loop.run_in_executor(None, check)
+                if healthy:
+                    if failed_checks > 0:
+                        logger.info(f"[MONITOR] Server has recovered. Resetting failed checks.")
+                    failed_checks = 0
+                else:
+                    failed_checks += 1
+                    logger.warning(f"[MONITOR] Self-check failed ({failed_checks}/5)")
+            except Exception as monitor_err:
+                failed_checks += 1
+                logger.error(f"[MONITOR] Error running self-check: {monitor_err}")
                 
-            except Exception as task_err:
-                logger.error(f"[STARTUP] [PID {my_pid}] Failed during background startup tasks: {task_err}")
-            finally:
-                # Release the lock file so future startups can acquire it
-                try:
-                    if os.path.exists(lock_path):
-                        # Ensure we only delete our own lock file
-                        with open(lock_path, "r") as f:
-                            lock_pid = f.read().strip()
-                        if lock_pid == str(my_pid):
-                            os.remove(lock_path)
-                            logger.info(f"[STARTUP] [PID {my_pid}] Released startup lock.")
-                except Exception as release_err:
-                    logger.warning(f"[STARTUP] [PID {my_pid}] Failed to release startup lock: {release_err}")
+            if failed_checks >= 5:
+                logger.critical("[MONITOR] Port 3000 is unresponsive for 150 seconds. Triggering graceful restart.")
+                sys.exit(1)
 
     # Create the non-blocking task on the running event loop
     asyncio.create_task(run_startup_tasks_background())
-    logger.info("[STARTUP] Non-blocking background startup tasks initiated. Server is ready to accept requests.")
+    asyncio.create_task(start_self_monitor())
+    logger.info("[STARTUP] Non-blocking background startup tasks and self-monitoring initiated. Server is ready.")
 
 @app.get("/")
 async def root():
