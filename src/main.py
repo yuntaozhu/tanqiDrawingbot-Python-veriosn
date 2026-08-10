@@ -2,6 +2,9 @@ from fastapi import FastAPI, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from src.routes import router
 from src.logger import setup_logger
+import asyncio
+import os
+import time
 
 logger = setup_logger("main")
 
@@ -16,10 +19,12 @@ app = FastAPI(
     ]
 )
 
+# Global startup flag
+_startup_completed = False
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     import uuid
-    import time
     from src.logger import set_trace_id
 
     # Extract existing Trace-ID or generate a new one
@@ -51,60 +56,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.on_event("startup")
-async def startup_event():
-    import os
-    import time
-    import asyncio
+async def _perform_startup_tasks():
+    """
+    Perform all startup tasks asynchronously in the background.
+    This function runs as a background task after the HTTP server is ready.
+    """
+    global _startup_completed
     
-    # ===== Step 1: Initialize database schema (MUST SUCCEED) =====
-    logger.info("[STARTUP] Initializing database schema...")
     try:
-        from src.database import initialize_db_schema
-        loop = asyncio.get_running_loop()
-        
-        await asyncio.wait_for(
-            loop.run_in_executor(None, initialize_db_schema),
-            timeout=15,
-        )
-        logger.info("[STARTUP] Database schema initialized.")
-    except asyncio.TimeoutError:
-        logger.error("[STARTUP] Database schema initialization timed out!")
-        raise
-    except Exception as db_init_err:
-        logger.error(f"[STARTUP] Failed to initialize database schema: {db_init_err}")
-        raise
+        # ===== Step 1: Initialize database schema =====
+        logger.info("[STARTUP] Initializing database schema...")
+        try:
+            from src.database import initialize_db_schema
+            loop = asyncio.get_running_loop()
+            
+            await asyncio.wait_for(
+                loop.run_in_executor(None, initialize_db_schema),
+                timeout=15,
+            )
+            logger.info("[STARTUP] Database schema initialized.")
+        except asyncio.TimeoutError:
+            logger.error("[STARTUP] Database schema initialization timed out!")
+            raise
+        except Exception as db_init_err:
+            logger.error(f"[STARTUP] Failed to initialize database schema: {db_init_err}")
+            raise
 
-    # ===== Step 2: Start background cleanup task (non-blocking) =====
-    lock_path = ".db_cleanup.lock"
-    should_run = False
-    
-    try:
-        # If the lock file is old (e.g. from a crashed previous run), remove it
-        if os.path.exists(lock_path):
-            try:
-                mtime = os.path.getmtime(lock_path)
-                if time.time() - mtime > 300:
-                    os.remove(lock_path)
-            except Exception:
-                pass
-                
-        # Exclusive creation mode ('x') ensures only one worker succeeds
-        with open(lock_path, "x") as f:
-            f.write(str(time.time()))
-        should_run = True
-    except FileExistsError:
+        # ===== Step 2: Start database cleanup task =====
+        lock_path = ".db_cleanup.lock"
         should_run = False
-    except Exception as e:
-        # If any other error occurs, default to True to ensure cleanup runs at least once
-        logger.warning(f"[STARTUP] Error acquiring cleanup lock: {e}. Defaulting to run.")
-        should_run = True
+        
+        try:
+            # If the lock file is old (e.g. from a crashed previous run), remove it
+            if os.path.exists(lock_path):
+                try:
+                    mtime = os.path.getmtime(lock_path)
+                    if time.time() - mtime > 300:
+                        os.remove(lock_path)
+                except Exception:
+                    pass
+                    
+            # Exclusive creation mode ('x') ensures only one process succeeds
+            with open(lock_path, "x") as f:
+                f.write(str(time.time()))
+            should_run = True
+        except FileExistsError:
+            should_run = False
+        except Exception as e:
+            logger.warning(f"[STARTUP] Error acquiring cleanup lock: {e}. Defaulting to run.")
+            should_run = True
 
-    if should_run:
-        async def _run_cleanup_with_timeout():
+        if should_run:
             try:
                 from src.crud import cleanup_zero_vectors_in_db
-                logger.info("[STARTUP] Starting database cleanup for zero vectors (acquired exclusive lock)...")
+                logger.info("[STARTUP] Starting database cleanup for zero vectors...")
                 loop = asyncio.get_running_loop()
                 await asyncio.wait_for(
                     loop.run_in_executor(None, cleanup_zero_vectors_in_db),
@@ -112,19 +117,36 @@ async def startup_event():
                 )
                 logger.info("[STARTUP] Cleanup completed.")
             except asyncio.TimeoutError:
-                logger.warning("[STARTUP] Cleanup timed out; continuing startup...")
-            except Exception as start_err:
-                logger.error(f"[ERROR] [STARTUP] Failed during zero-vector cleanup startup phase: {start_err}")
+                logger.warning("[STARTUP] Cleanup timed out; continuing...")
+            except Exception as cleanup_err:
+                logger.error(f"[STARTUP] Cleanup failed: {cleanup_err}")
             finally:
                 try:
                     if os.path.exists(lock_path):
                         os.remove(lock_path)
                 except Exception:
                     pass
+        else:
+            logger.info("[STARTUP] Skipping database cleanup (another process is handling it).")
+        
+        _startup_completed = True
+        logger.info("[STARTUP] All startup tasks completed successfully!")
+        
+    except Exception as e:
+        logger.error(f"[STARTUP] Fatal error in startup tasks: {e}")
+        _startup_completed = False
 
-        asyncio.create_task(_run_cleanup_with_timeout())
-    else:
-        logger.info("[STARTUP] Skipping database cleanup (handled by another primary worker process).")
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    Minimal startup event handler.
+    Schedules the actual startup tasks to run in the background.
+    Returns immediately so the HTTP server can fully initialize.
+    """
+    logger.info("[STARTUP] FastAPI startup event triggered. Scheduling background startup tasks...")
+    asyncio.create_task(_perform_startup_tasks())
+
 
 @app.get("/")
 async def root():
@@ -140,3 +162,4 @@ async def favicon():
 
 # Include the routers
 app.include_router(router)
+
