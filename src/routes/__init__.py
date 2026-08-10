@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from src.routes.device import router as device_router
 from src.routes.admin import router as admin_router
 from src.routes.general import router as general_router
+from src.routes.realtime import router as realtime_router
 
 router = APIRouter()
 
@@ -9,3 +10,5 @@ router = APIRouter()
 router.include_router(device_router)
 router.include_router(admin_router)
 router.include_router(general_router)
+router.include_router(realtime_router)
+
