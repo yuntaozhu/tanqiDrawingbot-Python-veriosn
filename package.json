@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "description": "Python API version of Toddler Drawing Dreamer",
   "scripts": {
-    "dev": "python3 app.py",
-    "start": "python3 app.py",
-    "build": "python3 -m py_compile app.py",
-    "lint": "python3 -m py_compile app.py"
+    "dev": "python3.11 app.py",
+    "start": "python3.11 app.py",
+    "build": "python3.11 -m py_compile app.py",
+    "lint": "python3.11 -m py_compile app.py"
   },
   "dependencies": {
     "sqlalchemy": "^10.1.1"
