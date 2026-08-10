@@ -103,6 +103,7 @@ def split_text_into_chunks(text: str, max_chunk_len: int = 120) -> List[str]:
 class DeepSeekAPI:
 
     _instance = None
+    _doubao_tts_failed = False
 
     @classmethod
     def get_instance(cls):
@@ -339,7 +340,7 @@ class DeepSeekAPI:
         providers = []
         
         # 1. Doubao Voice Design (User requested "使用Doubao-音色设计" - but falls back if 404)
-        if ARK_API_KEY:
+        if ARK_API_KEY and not DeepSeekAPI._doubao_tts_failed:
              providers.append({
                  "name": "Doubao-VoiceDesign",
                  "key": ARK_API_KEY,
@@ -422,6 +423,9 @@ class DeepSeekAPI:
                 return base64_data
             except Exception as e:
                 print(f"[ERROR] [TTS] Provider {provider['name']} failed: {e}")
+                if provider["name"] == "Doubao-VoiceDesign":
+                    print("[WARNING] [TTS] Marking Doubao-VoiceDesign as failed. Circuit breaker active. Future requests will skip it.")
+                    DeepSeekAPI._doubao_tts_failed = True
                 continue
         
         print("[ERROR] [TTS] All TTS providers failed.")
@@ -507,7 +511,7 @@ class DoubaoAPI:
             "4. 场景最终必须非常适合被画成黑白简笔画或绘本线稿。"
         )
         try:
-            print(f"[DEBUG] [PROMPT_EXPAND] Requesting LLM expansion with 10.0s timeout for: '{child_prompt}'")
+            print(f"[DEBUG] [PROMPT_EXPAND] Requesting LLM expansion with 20.0s timeout for: '{child_prompt}'")
             response = self.client.chat.completions.create(
                 model=self.audio_model,
                 messages=[
@@ -516,7 +520,7 @@ class DoubaoAPI:
                 ],
                 max_tokens=60,
                 temperature=0.85,
-                timeout=10.0  # Increased to 10.0s to allow Doubao to finish properly
+                timeout=20.0  # Increased to 20.0s to allow Doubao to finish properly
             )
             expanded = response.choices[0].message.content.strip()
             # Clean up potential leading/trailing quotes or helper text
@@ -559,7 +563,7 @@ class DoubaoAPI:
                         "mode": "fast"  # fast mode is highly optimized for ultra low latency / high speed
                     }
                 },
-                timeout=15
+                timeout=45
             )
             urls = [item.url for item in response.data]
             print(f"[DEBUG] [DOUBAO_DRAW] Success! Generated URL: {urls[0] if urls else 'None'}")

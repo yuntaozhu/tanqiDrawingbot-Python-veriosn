@@ -176,7 +176,7 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
         if drawing_task:
             try:
                 wait_seconds = 0
-                max_wait_seconds = 15
+                max_wait_seconds = 45
                 while not drawing_task.done() and wait_seconds < max_wait_seconds:
                     try:
                         action_result = await asyncio.wait_for(asyncio.shield(drawing_task), timeout=1.0)
@@ -246,7 +246,7 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
         yield f"data: {json.dumps(final_payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
-        timeout_generator(event_generator(), limit=20.0),
+        timeout_generator(event_generator(), limit=60.0),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
