@@ -1,0 +1,121 @@
+🔧 PR #14 修复: 启动阻塞导致的 502 错误 - AI 开发提示词
+
+【问题】
+Railway 应用返回 502 connection refused。根本原因: src/main.py 中的 startup_event() 同步调用 cleanup_zero_vectors_in_db(),这个函数扫描 PsychVectorDB 表的所有行,无限期阻塞应用启动。由于事件循环被阻塞,FastAPI 无法进入运行状态,无法接收任何请求。
+
+【修复目标】
+改变 cleanup 函数的执行方式和方法,让应用能在 10 秒内启动,即使 cleanup 还未完成。
+
+【修复内容】
+
+1️⃣ src/main.py - startup_event() 修改
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+当前代码:
+```python
+@app.on_event("startup")
+async def startup_event():
+ ...
+ if should_run:
+ cleanup_zero_vectors_in_db()  # ← 同步阻塞!
+```
+
+修复方案:
+a) 导入 asyncio
+b) 创建内嵌的 async 函数 _run_cleanup_with_timeout()
+c) 在内部使用:
+   - asyncio.get_running_loop() 获取事件循环
+   - loop.run_in_executor(None, cleanup_zero_vectors_in_db) 在线程池中运行同步函数
+   - asyncio.wait_for(..., timeout=10) 设置 10 秒超时
+   - 捕获 asyncio.TimeoutError,记录警告但继续启动 (不 raise!)
+   - 捕获其他异常,记录错误但继续启动
+d) 使用 asyncio.create_task(_run_cleanup_with_timeout()) 创建后台任务,不等待
+e) 锁文件清理仍在 finally 块中进行
+
+关键点:
+- ✅ run_in_executor 让同步函数在线程中运行,不阻塞事件循环
+- ✅ wait_for 加超时,防止无限期卡住
+- ✅ create_task 让 cleanup 在后台运行,startup 立即返回
+- ✅ 超时不是致命错误,只是记录警告,应用继续运行
+
+2️⃣ src/crud.py - cleanup_zero_vectors_in_db() 修改
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+当前代码:
+```python
+def cleanup_zero_vectors_in_db():
+ db = SessionLocal()
+ entries = db.query(PsychVectorDB).all()  # ← 一次性加载全表!
+ for e in entries:
+ ...
+ if updated_count > 0:
+ db.commit()  # ← 一次性提交
+```
+
+修复方案 (添加 batch_size 参数):
+a) 函数签名改为: def cleanup_zero_vectors_in_db(batch_size: int = 1000)
+b) 记录开始时间: start_time = time.time()
+c) 初始化统计: total_updated = 0, total_scanned = 0
+d) 先查询总数: total_rows = db.query(PsychVectorDB).count()
+e) 使用 while True 循环和 offset 变量:
+   - offset = 0
+   - while True:
+     - entries = db.query(PsychVectorDB).order_by(PsychVectorDB.id).offset(offset).limit(batch_size).all()
+     - if not entries: break
+f) 在循环内处理每一批:
+   - batch_updated = 0
+   - 循环处理每条记录 (原有逻辑不变)
+   - 如果有改动,batch_updated += 1
+g) 每批完成后立即提交:
+   - if batch_updated > 0: db.commit()
+   - else: db.rollback()
+   - 异常处理: 记录错误但继续下一批
+h) 更新统计:
+   - total_updated += batch_updated
+   - total_scanned += len(entries)
+   - 打印进度: offset, batch size, 本批更新数, 已扫描/总数
+i) offset += batch_size (继续下一批)
+j) 循环结束后打印最终统计: 总耗时、总扫描数、总更新数
+
+关键点:
+- ✅ LIMIT + OFFSET 分批查询,避免一次性加载全表
+- ✅ 每批独立提交,失败恢复快速
+- ✅ 内存占用恒定 (最多 1000 行的对象)
+- ✅ 数据库锁定时间短 (每批可能只需 100ms)
+- ✅ 详细日志记录处理进度
+
+【预期结果】
+✓ 应用启动时间: 从无限期 → 秒级
+✓ 应用响应: 从 502 connection refused → 200 OK
+✓ cleanup 继续: 在后台异步运行,无碍主应用
+✓ 大表处理: 内存和锁定时间有界
+✓ 可观测性: 详细的进度日志
+
+【验证】
+部署后:
+1. Deploy 日志应该显示 "[STARTUP] Cleanup completed" 或 "timed out warning"
+2. 应该能访问 https://tanqibot.up.railway.app/health 返回 200
+3. 应该能访问 API 端点,收到正常响应
+4. 网络日志不应该有 502 connection refused
+
+【代码文件】
+- 修改: src/main.py (startup_event 函数)
+- 修改: src/crud.py (cleanup_zero_vectors_in_db 函数)
+- 无需修改其他文件
+
+【完成标准】
+☑ startup_event() 使用 run_in_executor + wait_for + create_task
+☑ cleanup_zero_vectors_in_db() 改为分批处理 (LIMIT/OFFSET)
+☑ 添加了 10 秒超时保护
+☑ 添加了详细的日志记录
+☑ 异常处理不会导致应用启动失败
+☑ 应用在 10 秒内能进入可服务状态
+
+【为什么这样修改】
+问题: 同步阻塞函数导致事件循环卡住,应用无法启动
+解决: 
+1. 异步化: 同步 → 后台任务
+2. 超时: 无限期 → 10 秒超时后继续
+3. 分批: 全表加载 → 1000 行一批
+效果: 应用能快速启动和响应,cleanup 继续在后台运行
+
