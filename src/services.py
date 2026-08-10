@@ -338,19 +338,7 @@ class DeepSeekAPI:
         print(f"[DEBUG] [TTS] Generating speech for: '{text[:50]}...' with voice config: {voice_name}")
         providers = []
         
-        # 1. Primary TTS from Env
-        if TTS_API_KEY:
-             providers.append({"name": "Primary (Env)", "key": TTS_API_KEY, "url": TTS_BASE_URL})
-              
-        # 2. SiliconFlow Fallback
-        if SILICONFLOW_API_KEY:
-             providers.append({"name": "SiliconFlow", "key": SILICONFLOW_API_KEY, "url": "https://api.siliconflow.cn/v1"})
-            
-        # 3. OpenAI Fallback
-        if OPENAI_API_KEY:
-            providers.append({"name": "OpenAI", "key": OPENAI_API_KEY, "url": "https://api.openai.com/v1"})
-
-        # 4. Doubao Voice Design (User requested "使用Doubao-音色设计" - but falls back if 404)
+        # 1. Doubao Voice Design (User requested "使用Doubao-音色设计" - but falls back if 404)
         if ARK_API_KEY:
              providers.append({
                  "name": "Doubao-VoiceDesign",
@@ -358,6 +346,18 @@ class DeepSeekAPI:
                  "url": "https://ark.cn-beijing.volces.com/api/v3",
                  "model": ARK_TTS_MODEL
              })
+
+        # 2. Primary TTS from Env
+        if TTS_API_KEY:
+             providers.append({"name": "Primary (Env)", "key": TTS_API_KEY, "url": TTS_BASE_URL})
+              
+        # 3. SiliconFlow Fallback
+        if SILICONFLOW_API_KEY:
+             providers.append({"name": "SiliconFlow", "key": SILICONFLOW_API_KEY, "url": "https://api.siliconflow.cn/v1"})
+            
+        # 4. OpenAI Fallback
+        if OPENAI_API_KEY:
+            providers.append({"name": "OpenAI", "key": OPENAI_API_KEY, "url": "https://api.openai.com/v1"})
 
         if not providers:
             print("[WARNING] [TTS] No valid TTS providers configured.")
@@ -997,10 +997,9 @@ def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protag
     if doubao_api.client:
         engines.append(("doubao", lambda: doubao_api.generate_image(prompt, aspect_ratio, num_images)))
         
-    engines.extend([
-        ("replicate", lambda: replicate_api.generate_image(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style)),
+    engines.append(
         ("ideogram", lambda: ideogram_api.generate_image(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style))
-    ])
+    )
     
     if preferred_engine:
         preferred = next((e for e in engines if e[0] == preferred_engine), None)

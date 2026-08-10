@@ -55,9 +55,6 @@ app.add_middleware(
 async def startup_event():
     import asyncio
     import logging
-    import os
-    import sys
-    import urllib.request
     
     logger = logging.getLogger("uvicorn")
     
@@ -88,46 +85,9 @@ async def startup_event():
         except Exception as task_err:
             logger.error(f"[STARTUP] Error during background startup tasks: {task_err}")
 
-    async def start_self_monitor():
-        port = int(os.getenv("PORT", 3000))
-        url = f"http://127.0.0.1:{port}/health"
-        failed_checks = 0
-        
-        # Wait a few seconds initially for the server to start listening
-        await asyncio.sleep(5)
-        logger.info(f"[MONITOR] Self-monitoring started. Checking: {url}")
-        
-        while True:
-            await asyncio.sleep(30)
-            try:
-                loop = asyncio.get_running_loop()
-                def check():
-                    try:
-                        with urllib.request.urlopen(url, timeout=3) as response:
-                            return response.getcode() == 200
-                    except Exception:
-                        return False
-                
-                healthy = await loop.run_in_executor(None, check)
-                if healthy:
-                    if failed_checks > 0:
-                        logger.info(f"[MONITOR] Server has recovered. Resetting failed checks.")
-                    failed_checks = 0
-                else:
-                    failed_checks += 1
-                    logger.warning(f"[MONITOR] Self-check failed ({failed_checks}/5)")
-            except Exception as monitor_err:
-                failed_checks += 1
-                logger.error(f"[MONITOR] Error running self-check: {monitor_err}")
-                
-            if failed_checks >= 5:
-                logger.critical("[MONITOR] Port 3000 is unresponsive for 150 seconds. Triggering graceful restart.")
-                sys.exit(1)
-
     # Create the non-blocking task on the running event loop
     asyncio.create_task(run_startup_tasks_background())
-    asyncio.create_task(start_self_monitor())
-    logger.info("[STARTUP] Non-blocking background startup tasks and self-monitoring initiated. Server is ready.")
+    logger.info("[STARTUP] Non-blocking background startup tasks initiated. Server is ready.")
 
 @app.get("/")
 async def root():

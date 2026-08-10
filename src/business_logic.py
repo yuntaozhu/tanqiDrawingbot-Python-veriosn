@@ -888,9 +888,24 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                 print(f"[DEBUG] [CORE] LLM requested drawing: '{prompt}'")
                 
                 try:
-                    replicate_api = ReplicateAPI()
                     print(f"[DEBUG] [CORE] Translating logic to English...")
-                    english_prompt = replicate_api.generate_text(f"Translate the following text into English. Output ONLY the English translation, no other text. Text: {prompt}")
+                    english_prompt = prompt
+                    if doubao.client:
+                        try:
+                            res_trans = doubao.client.chat.completions.create(
+                                model=doubao.audio_model,
+                                messages=[
+                                    {"role": "system", "content": "You are a professional English translator. Translate the given text to English. Output ONLY the translation without any other text or explanation."},
+                                    {"role": "user", "content": prompt}
+                                ],
+                                timeout=5.0
+                            )
+                            english_prompt = res_trans.choices[0].message.content.strip()
+                            print(f"[DEBUG] [CORE] Translated to English using Doubao: '{english_prompt}'")
+                        except Exception as trans_err:
+                            print(f"[WARNING] [CORE] Doubao translation failed: {trans_err}. Using original prompt.")
+                    else:
+                        print(f"[WARNING] [CORE] Doubao is not configured, using original prompt.")
                     print(f"[DEBUG] [CORE] English Prompt: '{english_prompt}'")
                     
                     result = generate_image_with_fallback(english_prompt)
@@ -958,9 +973,24 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                 
                 print(f"[DEBUG] [CORE] Backup drawing triggered for prompt: '{prompt}'")
                 try:
-                    replicate_api = ReplicateAPI()
                     print(f"[DEBUG] [CORE] Translating logic to English...")
-                    english_prompt = replicate_api.generate_text(f"Translate the following text into English. Output ONLY the English translation, no other text. Text: {prompt}")
+                    english_prompt = prompt
+                    if doubao.client:
+                        try:
+                            res_trans = doubao.client.chat.completions.create(
+                                model=doubao.audio_model,
+                                messages=[
+                                    {"role": "system", "content": "You are a professional English translator. Translate the given text to English. Output ONLY the translation without any other text or explanation."},
+                                    {"role": "user", "content": prompt}
+                                ],
+                                timeout=5.0
+                            )
+                            english_prompt = res_trans.choices[0].message.content.strip()
+                            print(f"[DEBUG] [CORE] Translated to English using Doubao: '{english_prompt}'")
+                        except Exception as trans_err:
+                            print(f"[WARNING] [CORE] Doubao translation failed: {trans_err}. Using original prompt.")
+                    else:
+                        print(f"[WARNING] [CORE] Doubao is not configured, using original prompt.")
                     print(f"[DEBUG] [CORE] English Prompt: '{english_prompt}'")
                     
                     result = generate_image_with_fallback(english_prompt)
