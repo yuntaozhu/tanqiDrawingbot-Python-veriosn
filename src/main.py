@@ -57,6 +57,25 @@ async def startup_event():
     import time
     import asyncio
     
+    # ===== Step 1: Initialize database schema (MUST SUCCEED) =====
+    logger.info("[STARTUP] Initializing database schema...")
+    try:
+        from src.database import initialize_db_schema
+        loop = asyncio.get_running_loop()
+        
+        await asyncio.wait_for(
+            loop.run_in_executor(None, initialize_db_schema),
+            timeout=15,
+        )
+        logger.info("[STARTUP] Database schema initialized.")
+    except asyncio.TimeoutError:
+        logger.error("[STARTUP] Database schema initialization timed out!")
+        raise
+    except Exception as db_init_err:
+        logger.error(f"[STARTUP] Failed to initialize database schema: {db_init_err}")
+        raise
+
+    # ===== Step 2: Start background cleanup task (non-blocking) =====
     lock_path = ".db_cleanup.lock"
     should_run = False
     

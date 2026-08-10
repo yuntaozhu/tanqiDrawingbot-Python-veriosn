@@ -19,19 +19,59 @@ from src.models import (
 )
 from src.conversation_models import ConversationContext, DrawingHistory
 
-try:
-    Base.metadata.create_all(bind=engine)
-except Exception as e:
-    print(f"[WARNING] Database initialization encountered error: {e}. Attempting to recreate database...")
-    engine.dispose()
-    if DATABASE_URL.startswith("sqlite:///"):
-        db_path = DATABASE_URL.replace("sqlite:///", "")
-        if os.path.exists(db_path):
+import threading
+import time
+
+_db_initialized = False
+_db_init_lock = threading.Lock()
+
+def _ensure_db_initialized():
+    global _db_initialized
+    if _db_initialized:
+        return
+    with _db_init_lock:
+        if _db_initialized:
+            return
+        
+        lock_file = ".db_init.lock"
+        acquired_lock = False
+        for _ in range(30):
             try:
-                os.remove(db_path)
-                print(f"[INFO] Removed corrupted database file: {db_path}")
-            except Exception as rm_err:
-                print(f"[ERROR] Failed to remove db file: {rm_err}")
-    Base.metadata.create_all(bind=engine)
-    print("[INFO] Database recreated successfully.")
+                with open(lock_file, "x") as f:
+                    f.write(str(time.time()))
+                acquired_lock = True
+                break
+            except FileExistsError:
+                time.sleep(0.1)
+            except Exception:
+                time.sleep(0.1)
+
+        try:
+            try:
+                Base.metadata.create_all(bind=engine)
+            except Exception as e:
+                print(f"[WARNING] Database initialization encountered error: {e}. Attempting to recreate database...")
+                engine.dispose()
+                if DATABASE_URL.startswith("sqlite:///"):
+                    db_path = DATABASE_URL.replace("sqlite:///", "")
+                    if os.path.exists(db_path):
+                        try:
+                            os.remove(db_path)
+                            print(f"[INFO] Removed corrupted database file: {db_path}")
+                        except Exception as rm_err:
+                            print(f"[ERROR] Failed to remove db file: {rm_err}")
+                Base.metadata.create_all(bind=engine)
+                print("[INFO] Database recreated successfully.")
+            _db_initialized = True
+        finally:
+            if acquired_lock:
+                try:
+                    if os.path.exists(lock_file):
+                        os.remove(lock_file)
+                except Exception:
+                    pass
+
+def initialize_db_schema():
+    _ensure_db_initialized()
+
 
