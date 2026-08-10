@@ -21,6 +21,7 @@ from src.config import (
     OPENAI_API_KEY
 )
 from src.utils import retry_with_backoff, preprocess_audio, get_image_metadata
+from src.volc_realtime import VolcRealtimeClient
 
 CACHE_FILE = "image_cache.json"
 STT_CACHE_FILE = "stt_cache.json"
