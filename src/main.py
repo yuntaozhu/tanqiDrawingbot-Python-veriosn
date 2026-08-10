@@ -81,18 +81,38 @@ async def startup_event():
         should_run = True
 
     if should_run:
-        try:
-            from src.crud import cleanup_zero_vectors_in_db
-            logger.info("[STARTUP] Starting database cleanup for zero vectors (acquired exclusive lock)...")
-            cleanup_zero_vectors_in_db()
-        except Exception as start_err:
-            logger.error(f"[ERROR] [STARTUP] Failed during zero-vector cleanup startup phase: {start_err}")
-        finally:
+        import asyncio
+
+        async def _run_cleanup_with_timeout():
             try:
-                if os.path.exists(lock_path):
-                    os.remove(lock_path)
-            except Exception:
-                pass
+                from src.crud import cleanup_zero_vectors_in_db
+                logger.info("[STARTUP] Starting database cleanup for zero vectors (acquired exclusive lock)...")
+                loop = asyncio.get_running_loop()
+                # Run the blocking DB work in a thread so it can never freeze the
+                # event loop, and bound it with a timeout so a slow/locked DB
+                # can't prevent the app from becoming ready to serve requests.
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, cleanup_zero_vectors_in_db),
+                    timeout=10,
+                )
+                logger.info("[STARTUP] Database cleanup for zero vectors completed.")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[STARTUP] Zero-vector cleanup timed out after 10s; continuing startup. "
+                    "The cleanup will keep running in the background and can be safely retried later."
+                )
+            except Exception as start_err:
+                logger.error(f"[ERROR] [STARTUP] Failed during zero-vector cleanup startup phase: {start_err}")
+            finally:
+                try:
+                    if os.path.exists(lock_path):
+                        os.remove(lock_path)
+                except Exception:
+                    pass
+
+        # Fire-and-forget as a background task so startup_event returns
+        # immediately and the app can start accepting requests right away.
+        asyncio.create_task(_run_cleanup_with_timeout())
     else:
         logger.info("[STARTUP] Skipping database cleanup (handled by another primary worker process).")
 
