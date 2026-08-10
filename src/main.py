@@ -55,6 +55,7 @@ app.add_middleware(
 async def startup_event():
     import os
     import time
+    import asyncio
     
     lock_path = ".db_cleanup.lock"
     should_run = False
@@ -81,18 +82,28 @@ async def startup_event():
         should_run = True
 
     if should_run:
-        try:
-            from src.crud import cleanup_zero_vectors_in_db
-            logger.info("[STARTUP] Starting database cleanup for zero vectors (acquired exclusive lock)...")
-            cleanup_zero_vectors_in_db()
-        except Exception as start_err:
-            logger.error(f"[ERROR] [STARTUP] Failed during zero-vector cleanup startup phase: {start_err}")
-        finally:
+        async def _run_cleanup_with_timeout():
             try:
-                if os.path.exists(lock_path):
-                    os.remove(lock_path)
-            except Exception:
-                pass
+                from src.crud import cleanup_zero_vectors_in_db
+                logger.info("[STARTUP] Starting database cleanup for zero vectors (acquired exclusive lock)...")
+                loop = asyncio.get_running_loop()
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, cleanup_zero_vectors_in_db),
+                    timeout=10,
+                )
+                logger.info("[STARTUP] Cleanup completed.")
+            except asyncio.TimeoutError:
+                logger.warning("[STARTUP] Cleanup timed out; continuing startup...")
+            except Exception as start_err:
+                logger.error(f"[ERROR] [STARTUP] Failed during zero-vector cleanup startup phase: {start_err}")
+            finally:
+                try:
+                    if os.path.exists(lock_path):
+                        os.remove(lock_path)
+                except Exception:
+                    pass
+
+        asyncio.create_task(_run_cleanup_with_timeout())
     else:
         logger.info("[STARTUP] Skipping database cleanup (handled by another primary worker process).")
 

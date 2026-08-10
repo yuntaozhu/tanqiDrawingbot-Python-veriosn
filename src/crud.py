@@ -226,43 +226,82 @@ def get_device_settings(device_token: str) -> str:
     finally:
         db.close()
 
-def cleanup_zero_vectors_in_db():
+def cleanup_zero_vectors_in_db(batch_size: int = 1000):
+    import time
     db = SessionLocal()
+    start_time = time.time()
+    total_updated = 0
+    total_scanned = 0
+    
     try:
-        entries = db.query(PsychVectorDB).all()
-        updated_count = 0
-        for e in entries:
+        total_rows = db.query(PsychVectorDB).count()
+        print(f"[INFO] Starting cleanup for {total_rows} rows...")
+        
+        offset = 0
+        while True:
+            entries = (
+                db.query(PsychVectorDB)
+                .order_by(PsychVectorDB.id)
+                .offset(offset)
+                .limit(batch_size)
+                .all()
+            )
+            
+            if not entries:
+                break
+                
+            batch_updated = 0
+            for e in entries:
+                try:
+                    embedding = json.loads(e.embedding_json) if e.embedding_json else []
+                    # Check if it is a dummy vector (all elements are zero or empty)
+                    is_zero = len(embedding) == 0 or all(x == 0.0 for x in embedding)
+                    
+                    metadata = json.loads(e.metadata_json) if e.metadata_json else {}
+                    changed = False
+                    
+                    if is_zero:
+                        if metadata.get("embedding_valid") is not False:
+                            metadata["embedding_valid"] = False
+                            metadata["embedding_available"] = False
+                            changed = True
+                    else:
+                        if metadata.get("embedding_valid") is not True:
+                            metadata["embedding_valid"] = True
+                            metadata["embedding_available"] = True
+                            changed = True
+                    
+                    if changed:
+                        e.metadata_json = json.dumps(metadata)
+                        batch_updated += 1
+                except Exception as entry_err:
+                    print(f"[WARNING] Failed to process entry during cleanup: {entry_err}")
+                    
             try:
-                embedding = json.loads(e.embedding_json) if e.embedding_json else []
-                # Check if it is a dummy vector (all elements are zero or empty)
-                is_zero = len(embedding) == 0 or all(x == 0.0 for x in embedding)
-                
-                metadata = json.loads(e.metadata_json) if e.metadata_json else {}
-                changed = False
-                
-                if is_zero:
-                    if metadata.get("embedding_valid") is not False:
-                        metadata["embedding_valid"] = False
-                        metadata["embedding_available"] = False
-                        changed = True
+                if batch_updated > 0:
+                    db.commit()
                 else:
-                    if metadata.get("embedding_valid") is not True:
-                        metadata["embedding_valid"] = True
-                        metadata["embedding_available"] = True
-                        changed = True
+                    db.rollback()
+            except Exception as commit_err:
+                print(f"[ERROR] Commit failed at offset {offset}: {commit_err}")
+                db.rollback()
                 
-                if changed:
-                    e.metadata_json = json.dumps(metadata)
-                    updated_count += 1
-            except Exception as entry_err:
-                print(f"[WARNING] Failed to process entry during cleanup: {entry_err}")
-                
-        if updated_count > 0:
-            db.commit()
-            print(f"[INFO] [DB_CLEANUP] Successfully marked/cleaned up {updated_count} zero-vector records in psych_vectors.")
+            total_updated += batch_updated
+            total_scanned += len(entries)
+            print(f"[INFO] Batch offset={offset} size={len(entries)} updated={batch_updated} "
+                  f"(scanned {total_scanned}/{total_rows} so far)")
+                  
+            offset += batch_size
+            
+        duration = time.time() - start_time
+        print(f"[INFO] Finished: scanned {total_scanned} rows, updated {total_updated} in {duration:.2f}s")
+        
     except Exception as e:
         print(f"[ERROR] [DB_CLEANUP] Failed to cleanup zero vectors: {e}")
-        db.rollback()
+        try:
+            db.rollback()
+        except:
+            pass
     finally:
         db.close()
 
