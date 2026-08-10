@@ -52,3 +52,9 @@ ARK_DRAW_MODEL = os.getenv("ARK_DRAW_MODEL", "doubao-seedream-5-0-pro-260628")
 ARK_TTS_MODEL = os.getenv("ARK_TTS_MODEL", "Doubao-Seed-VoiceDesign-1-0")
 EMBEDDING_MODEL_VISION = os.getenv("EMBEDDING_MODEL_VISION", "doubao-embedding-vision-251215")
 EMBEDDING_MODEL_TEXT = os.getenv("EMBEDDING_MODEL_TEXT", "doubao-embedding-large-text-250515")
+
+# Volcengine Realtime Voice API config
+VOLC_REALTIME_APP_ID = os.getenv("VOLC_REALTIME_APP_ID", "6665813986")
+VOLC_REALTIME_ACCESS_KEY = os.getenv("VOLC_REALTIME_ACCESS_KEY", "vdbmS9C5B06R64kXkhq0rbrf5zlTddjD")
+VOLC_REALTIME_SECRET_KEY = os.getenv("VOLC_REALTIME_SECRET_KEY", "JNsFZNNM4rx3io7dP6JF0t5F0hlilxfr")
+

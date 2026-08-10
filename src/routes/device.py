@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from typing import Optional
 from urllib.parse import unquote
 from src.schemas import ChatRequest, TTSRequest
-from src.config import DEEPSEEK_API_KEY
+from src.config import DEEPSEEK_API_KEY, VOLC_REALTIME_APP_ID, VOLC_REALTIME_ACCESS_KEY, VOLC_REALTIME_SECRET_KEY
 from src.crud import get_print_jobs_from_db, delete_print_job_from_db, save_print_job_to_db
 from src.services import VoiceInteractionService, DeepSeekAPI
 from src.business_logic import (
@@ -441,5 +441,37 @@ async def reset_conversation(request: Request):
         }
     else:
         raise HTTPException(status_code=500, detail="Failed to reset conversation context")
+
+
+@router.get("/api/device/v1/realtime-config")
+@router.get("/api/v1/realtime-config")
+async def get_realtime_config(request: Request):
+    token = request.headers.get("x-device-token") or request.headers.get("authorization")
+    if not token:
+        raise HTTPException(status_code=401, detail="x-device-token header is required")
+        
+    return {
+        "success": True,
+        "app_id": VOLC_REALTIME_APP_ID,
+        "api_key": VOLC_REALTIME_ACCESS_KEY,
+        "access_key": VOLC_REALTIME_ACCESS_KEY,
+        "secret_key": VOLC_REALTIME_SECRET_KEY,
+        "realtime_api_v2_legacy": {
+            "url": "wss://openspeech.bytedance.com/api/v3/realtime/dialogue",
+            "app_id": VOLC_REALTIME_APP_ID,
+            "access_key": VOLC_REALTIME_ACCESS_KEY,
+            "resource_id": "volc.speech.dialog",
+            "app_key": "PlgvMymc7f3tQnJ6"
+        },
+        "realtime_api_v3_duplex": {
+            "url": "wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue",
+            "app_id": VOLC_REALTIME_APP_ID,
+            "api_key": VOLC_REALTIME_ACCESS_KEY,
+            "model": "1.2.6.1",
+            "resource_id": "volc.speech.dialog",
+            "app_key": "PlgvMymc7f3tQnJ6"
+        }
+    }
+
 
 
