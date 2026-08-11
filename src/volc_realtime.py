@@ -33,11 +33,20 @@ class VolcRealtimeClient:
 
     def _get_headers(self) -> Dict[str, str]:
         # X-Api-Key can be access_key or secret_key or ARK_API_KEY depending on configuration
-        api_key = self.access_key or self.secret_key
+        api_key = (self.access_key or self.secret_key or "").strip()
+        app_id_stripped = str(self.app_id).strip()
+        resource_id_stripped = str(self.resource_id).strip()
+        
+        # Check if the key looks like a UUID (new console API Key format)
+        if len(api_key) == 36 and api_key.count("-") == 4:
+            return {
+                "X-Api-Key": api_key
+            }
+            
         return {
-            "X-Api-App-ID": str(self.app_id),
-            "X-Api-Key": str(api_key),
-            "X-Api-Resource-Id": str(self.resource_id)
+            "X-Api-App-ID": app_id_stripped,
+            "X-Api-Key": api_key,
+            "X-Api-Resource-Id": resource_id_stripped
         }
 
     async def connect(self):
