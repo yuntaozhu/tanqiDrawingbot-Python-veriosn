@@ -1066,53 +1066,40 @@ def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protag
             "metadata": entry.get("metadata", [None] * len(entry.get("urls", [])))
         }
 
-    replicate_api = ReplicateAPI.get_instance()
-    ideogram_api = IdeogramAPI.get_instance()
     doubao_api = DoubaoAPI.get_instance()
-    
-    engines = []
-    if doubao_api.client:
-        engines.append(("doubao", lambda: doubao_api.generate_image(prompt, aspect_ratio, num_images)))
-        
-    engines.append(
-        ("ideogram", lambda: ideogram_api.generate_image(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style))
-    )
-    
-    if preferred_engine:
-        preferred = next((e for e in engines if e[0] == preferred_engine), None)
-        if preferred:
-            engines.remove(preferred)
-            engines.insert(0, preferred)
-            
-    for name, generate_func in engines:
-        print(f"Attempting to generate image using: {name}")
-        try:
-            image_urls = generate_func()
-            if image_urls:
-                print(f"Successfully generated image using: {name}")
-                
-                metadata = []
-                for url in image_urls:
-                    try:
-                        metadata.append(get_image_metadata(url))
-                    except Exception as me:
-                        print(f"Failed to fetch metadata for {url}: {me}")
-                        metadata.append(None)
-                
-                IMAGE_CACHE[cache_key] = {
-                    "urls": image_urls,
-                    "metadata": metadata,
-                    "timestamp": time.time(),
-                    "engine": name
-                }
-                save_cache(CACHE_FILE, IMAGE_CACHE)
-                return {"urls": image_urls, "metadata": metadata}
-            else:
-                print(f"Engine {name} returned no images.")
-        except Exception as e:
-            print(f"Engine {name} failed with error: {e}")
-            
-    return {"urls": None, "metadata": None}
+
+    if not doubao_api.client:
+        print("Doubao API not configured (ARK_API_KEY missing).")
+        return {"urls": None, "metadata": None, "error": "Doubao API not configured"}
+
+    print("Attempting to generate image using: doubao")
+    try:
+        image_urls = doubao_api.generate_image(prompt, aspect_ratio, num_images)
+        if image_urls:
+            print("Successfully generated image using: doubao")
+
+            metadata = []
+            for url in image_urls:
+                try:
+                    metadata.append(get_image_metadata(url))
+                except Exception as me:
+                    print(f"Failed to fetch metadata for {url}: {me}")
+                    metadata.append(None)
+
+            IMAGE_CACHE[cache_key] = {
+                "urls": image_urls,
+                "metadata": metadata,
+                "timestamp": time.time(),
+                "engine": "doubao"
+            }
+            save_cache(CACHE_FILE, IMAGE_CACHE)
+            return {"urls": image_urls, "metadata": metadata}
+        else:
+            print("Engine doubao returned no images.")
+            return {"urls": None, "metadata": None}
+    except Exception as e:
+        print(f"Doubao image generation failed: {e}")
+        return {"urls": None, "metadata": None}
 
 
 class VoiceInteractionService:
