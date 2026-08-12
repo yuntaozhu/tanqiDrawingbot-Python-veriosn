@@ -18,7 +18,9 @@ from src.config import (
     STT_API_KEY, STT_BASE_URL, STT_MODEL,
     TTS_API_KEY, TTS_BASE_URL,
     SILICONFLOW_API_KEY, SILICONFLOW_STT_MODEL,
-    OPENAI_API_KEY
+    OPENAI_API_KEY,
+    VOLC_TTS_V3_APP_ID, VOLC_TTS_V3_ACCESS_KEY, VOLC_TTS_V3_RESOURCE_ID,
+    VOLC_TTS_V3_VOICE_TYPE, VOLC_TTS_V3_URL
 )
 from src.utils import retry_with_backoff, preprocess_audio, get_image_metadata
 from src.volc_realtime import VolcRealtimeClient
@@ -321,6 +323,54 @@ class DeepSeekAPI:
         print(f"[ERROR] [STT] All STT providers failed: {'; '.join(errors)}")
         return ""
 
+    def _generate_speech_v3(self, text: str) -> Optional[bytes]:
+        """Call Doubao TTS 2.0 V3 HTTP Chunked API with 天才童声 (zh_male_tiancaitongsheng_uranus_bigtts).
+        
+        Uses V3-exclusive request headers:
+          X-Api-App-Id      -> VOLC_TTS_V3_APP_ID
+          X-Api-Access-Key  -> VOLC_TTS_V3_ACCESS_KEY
+          X-Api-Resource-Id -> seed-tts-2.0
+        """
+        if not VOLC_TTS_V3_APP_ID or not VOLC_TTS_V3_ACCESS_KEY:
+            return None
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-Api-App-Id": VOLC_TTS_V3_APP_ID,
+            "X-Api-Access-Key": VOLC_TTS_V3_ACCESS_KEY,
+            "X-Api-Resource-Id": VOLC_TTS_V3_RESOURCE_ID,
+        }
+        payload = {
+            "text": text,
+            "voice_type": VOLC_TTS_V3_VOICE_TYPE,
+            "encoding": "mp3",
+            "speed_ratio": 1.0,
+            "volume_ratio": 1.0,
+            "pitch_ratio": 1.0,
+            # 语音指令：活泼欢快的孩童语气
+            "context_texts": ["用活泼欢快的孩童语气朗读"],
+        }
+        print(f"[DEBUG] [TTS_V3] Calling Doubao TTS 2.0 V3 ({VOLC_TTS_V3_VOICE_TYPE}): '{text[:60]}...'")
+        resp = requests.post(
+            VOLC_TTS_V3_URL,
+            json=payload,
+            headers=headers,
+            timeout=20,
+            stream=True
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Doubao TTS V3 HTTP {resp.status_code}: {resp.text[:200]}")
+
+        audio_chunks = []
+        for chunk in resp.iter_content(chunk_size=4096):
+            if chunk:
+                audio_chunks.append(chunk)
+        audio_bytes = b"".join(audio_chunks)
+        if not audio_bytes:
+            raise RuntimeError("Doubao TTS V3 returned empty audio")
+        print(f"[DEBUG] [TTS_V3] Success! Received {len(audio_bytes)} bytes of audio.")
+        return audio_bytes
+
     @retry_with_backoff(max_retries=2)
     def generate_speech(self, text: str, voice_name: Optional[str] = None) -> Optional[str]:
         """Convert text to speech with fallback support for multiple providers."""
@@ -337,9 +387,32 @@ class DeepSeekAPI:
             return TTS_CACHE[text_hash].get("audio_base64")
 
         print(f"[DEBUG] [TTS] Generating speech for: '{text[:50]}...' with voice config: {voice_name}")
+
+        # ----------------------------------------------------------------
+        # 优先级 1：豆包 TTS 2.0 V3 — 天才童声（zh_male_tiancaitongsheng_uranus_bigtts）
+        # 使用 HTTP Chunked 单向流式接口，携带 V3 专属请求头
+        # ----------------------------------------------------------------
+        if VOLC_TTS_V3_APP_ID and VOLC_TTS_V3_ACCESS_KEY:
+            try:
+                start_time = time.time()
+                audio_bytes = self._generate_speech_v3(text)
+                if audio_bytes:
+                    duration = time.time() - start_time
+                    base64_data = base64.b64encode(audio_bytes).decode('utf-8')
+                    print(f"[DEBUG] [TTS] V3 provider succeeded in {duration:.2f}s, size: {len(base64_data)} chars")
+                    TTS_CACHE[text_hash] = {
+                        "audio_base64": base64_data,
+                        "timestamp": time.time(),
+                        "provider": "Doubao-TTS-V3"
+                    }
+                    save_cache(TTS_CACHE_FILE, TTS_CACHE)
+                    return base64_data
+            except Exception as e:
+                print(f"[WARNING] [TTS] Doubao TTS V3 failed: {e}. Falling back to legacy providers...")
+
         providers = []
         
-        # 1. Doubao Voice Design (User requested "使用Doubao-音色设计" - but falls back if 404)
+        # 2. Doubao Voice Design (legacy OpenAI-compatible, falls back if 404)
         if ARK_API_KEY and not DeepSeekAPI._doubao_tts_failed:
              providers.append({
                  "name": "Doubao-VoiceDesign",
@@ -348,15 +421,15 @@ class DeepSeekAPI:
                  "model": ARK_TTS_MODEL
              })
 
-        # 2. Primary TTS from Env
+        # 3. Primary TTS from Env
         if TTS_API_KEY:
              providers.append({"name": "Primary (Env)", "key": TTS_API_KEY, "url": TTS_BASE_URL})
               
-        # 3. SiliconFlow Fallback
+        # 4. SiliconFlow Fallback
         if SILICONFLOW_API_KEY:
              providers.append({"name": "SiliconFlow", "key": SILICONFLOW_API_KEY, "url": "https://api.siliconflow.cn/v1"})
             
-        # 4. OpenAI Fallback
+        # 5. OpenAI Fallback
         if OPENAI_API_KEY:
             providers.append({"name": "OpenAI", "key": OPENAI_API_KEY, "url": "https://api.openai.com/v1"})
 

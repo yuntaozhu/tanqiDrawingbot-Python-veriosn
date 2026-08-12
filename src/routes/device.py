@@ -478,7 +478,11 @@ async def get_realtime_config(request: Request):
     if not token:
         raise HTTPException(status_code=401, detail="x-device-token header is required")
         
-    app_id_val = "PlgvMymc7f3tQnJ6" if VOLC_REALTIME_APP_ID == "6665813986" else VOLC_REALTIME_APP_ID
+    volc_app_id = VOLC_REALTIME_APP_ID.strip() if VOLC_REALTIME_APP_ID else ""
+    app_id_val = "PlgvMymc7f3tQnJ6" if volc_app_id == "6665813986" else volc_app_id
+    
+    scheme = "wss" if request.url.scheme == "https" else "ws"
+    proxy_url = f"{scheme}://{request.url.netloc}/api/v3/duplex/realtime/dialogue"
         
     return {
         "success": True,
@@ -494,7 +498,7 @@ async def get_realtime_config(request: Request):
             "app_key": "PlgvMymc7f3tQnJ6"
         },
         "realtime_api_v3_duplex": {
-            "url": "wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue",
+            "url": proxy_url,
             "app_id": app_id_val,
             "api_key": VOLC_REALTIME_ACCESS_KEY,
             "model": "1.2.6.1",

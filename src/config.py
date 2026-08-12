@@ -58,3 +58,10 @@ VOLC_REALTIME_APP_ID = os.getenv("VOLC_REALTIME_APP_ID", "6665813986")
 VOLC_REALTIME_ACCESS_KEY = os.getenv("VOLC_REALTIME_ACCESS_KEY", "vdbmS9C5B06R64kXkhq0rbrf5zlTddjD")
 VOLC_REALTIME_SECRET_KEY = os.getenv("VOLC_REALTIME_SECRET_KEY", "JNsFZNNM4rx3io7dP6JF0t5F0hlilxfr")
 
+# Doubao TTS 2.0 V3 API config (天才童声 官方音色)
+# X-Api-App-Id 复用火山引擎 APP_ID，X-Api-Access-Key 复用 Access Key
+VOLC_TTS_V3_APP_ID = os.getenv("VOLC_TTS_V3_APP_ID", VOLC_REALTIME_APP_ID)
+VOLC_TTS_V3_ACCESS_KEY = os.getenv("VOLC_TTS_V3_ACCESS_KEY", "22bcaa65-23fe-42c1-88af-ab526d5ef0a0")
+VOLC_TTS_V3_RESOURCE_ID = os.getenv("VOLC_TTS_V3_RESOURCE_ID", "seed-tts-2.0")
+VOLC_TTS_V3_VOICE_TYPE = os.getenv("VOLC_TTS_V3_VOICE_TYPE", "zh_male_tiancaitongsheng_uranus_bigtts")
+VOLC_TTS_V3_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
