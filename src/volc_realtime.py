@@ -24,10 +24,12 @@ class VolcRealtimeClient:
         resource_id: Optional[str] = None,
         uri: str = "wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue"
     ):
-        self.app_id = app_id or os.getenv("VOLC_REALTIME_APP_ID", "6665813986")
+        raw_app_id = app_id or os.getenv("VOLC_REALTIME_APP_ID", "6665813986")
+        # Normalize legacy numeric app_id → actual API app_id (same mapping as get_realtime_config)
+        self.app_id = "PlgvMymc7f3tQnJ6" if str(raw_app_id).strip() == "6665813986" else str(raw_app_id).strip()
         self.access_key = access_key or os.getenv("VOLC_REALTIME_ACCESS_KEY") or os.getenv("ARK_API_KEY", "05a5b825-69f6-40ff-93e9-7493c05e4fb0")
         self.secret_key = secret_key or os.getenv("VOLC_REALTIME_SECRET_KEY", "JNsFZNNM4rx3io7dP6JF0t5F0hlilxfr")
-        self.resource_id = resource_id or os.getenv("VOLC_REALTIME_RESOURCE_ID", "volc.engine.realtime.v3")
+        self.resource_id = resource_id or os.getenv("VOLC_REALTIME_RESOURCE_ID", "volc.speech.dialog")
         self.uri = uri
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
 
