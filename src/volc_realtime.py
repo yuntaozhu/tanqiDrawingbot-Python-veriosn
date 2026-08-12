@@ -24,21 +24,27 @@ class VolcRealtimeClient:
         resource_id: Optional[str] = None,
         uri: str = "wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue"
     ):
-        raw_app_id = app_id or os.getenv("VOLC_REALTIME_APP_ID", "6665813986")
-        # Normalize legacy numeric app_id → actual API app_id (same mapping as get_realtime_config)
-        self.app_id = "PlgvMymc7f3tQnJ6" if str(raw_app_id).strip() == "6665813986" else str(raw_app_id).strip()
-        self.access_key = access_key or os.getenv("VOLC_REALTIME_ACCESS_KEY") or os.getenv("ARK_API_KEY", "05a5b825-69f6-40ff-93e9-7493c05e4fb0")
-        self.secret_key = secret_key or os.getenv("VOLC_REALTIME_SECRET_KEY", "JNsFZNNM4rx3io7dP6JF0t5F0hlilxfr")
+        # Get from parameters or environment variables
+        # CRITICAL: No hardcoded defaults - credentials must come from Railway env vars
+        self.app_id = app_id or os.getenv("VOLC_REALTIME_APP_ID")
+        self.access_key = access_key or os.getenv("VOLC_REALTIME_ACCESS_KEY")
+        self.secret_key = secret_key or os.getenv("VOLC_REALTIME_SECRET_KEY")
         self.resource_id = resource_id or os.getenv("VOLC_REALTIME_RESOURCE_ID", "volc.speech.dialog")
         self.uri = uri
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
+        
+        # Validate required credentials
+        if not self.app_id:
+            raise ValueError("VOLC_REALTIME_APP_ID must be provided or set in environment")
+        if not self.access_key:
+            raise ValueError("VOLC_REALTIME_ACCESS_KEY must be provided or set in environment")
 
     def _get_headers(self) -> Dict[str, str]:
         # Volcengine v3 duplex realtime API requires:
         #   X-Api-App-ID     — the numeric/string App ID
         #   X-Api-Access-Key — the access key (may be UUID format from console)
         #   X-Api-Resource-Id — the resource/product id (e.g. "volc.speech.dialog")
-        access_key = (self.access_key or self.secret_key or "").strip()
+        access_key = (self.access_key or "").strip()
         app_id_stripped = str(self.app_id).strip()
         resource_id_stripped = str(self.resource_id).strip()
 
@@ -127,3 +133,4 @@ class VolcRealtimeClient:
             await self.websocket.close()
             self.websocket = None
             logger.info("[VolcRealtime] WebSocket connection closed.")
+
