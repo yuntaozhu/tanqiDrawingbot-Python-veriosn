@@ -55,7 +55,7 @@ EMBEDDING_MODEL_TEXT = os.getenv("EMBEDDING_MODEL_TEXT", "doubao-embedding-large
 
 # Volcengine Realtime Voice API config - New Console (API Key method)
 # CRITICAL: Must be set via Railway environment variables
-# New console uses unified API Key authentication (no App ID/Access Token needed)
+# New console uses unified API Key authentication
 VOLC_REALTIME_API_KEY = os.getenv("VOLC_REALTIME_API_KEY")
 
 if not VOLC_REALTIME_API_KEY:
@@ -63,4 +63,12 @@ if not VOLC_REALTIME_API_KEY:
         "Volcengine Realtime API Key must be set via environment variable:\n"
         "  - VOLC_REALTIME_API_KEY (from 火山引擎 Speech Console > API Key Management)"
     )
+
+# Doubao TTS 2.0 V3 API config (天才童声 官方音色)
+# Now uses the unified VOLC_REALTIME_API_KEY for auth
+VOLC_TTS_V3_APP_ID = os.getenv("VOLC_TTS_V3_APP_ID")
+VOLC_TTS_V3_ACCESS_KEY = os.getenv("VOLC_TTS_V3_ACCESS_KEY", VOLC_REALTIME_API_KEY)
+VOLC_TTS_V3_RESOURCE_ID = os.getenv("VOLC_TTS_V3_RESOURCE_ID", "seed-tts-2.0")
+VOLC_TTS_V3_VOICE_TYPE = os.getenv("VOLC_TTS_V3_VOICE_TYPE", "zh_male_tiancaitongsheng_uranus_bigtts")
+VOLC_TTS_V3_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
 
