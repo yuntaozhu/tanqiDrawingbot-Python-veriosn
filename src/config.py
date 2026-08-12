@@ -53,26 +53,14 @@ ARK_TTS_MODEL = os.getenv("ARK_TTS_MODEL", "Doubao-Seed-VoiceDesign-1-0")
 EMBEDDING_MODEL_VISION = os.getenv("EMBEDDING_MODEL_VISION", "doubao-embedding-vision-251215")
 EMBEDDING_MODEL_TEXT = os.getenv("EMBEDDING_MODEL_TEXT", "doubao-embedding-large-text-250515")
 
-# Volcengine Realtime Voice API config
-# CRITICAL: Must be set via Railway environment variables - no hardcoded defaults
-# Expired defaults removed for security
-VOLC_REALTIME_APP_ID = os.getenv("VOLC_REALTIME_APP_ID")
-VOLC_REALTIME_ACCESS_KEY = os.getenv("VOLC_REALTIME_ACCESS_KEY")
-VOLC_REALTIME_SECRET_KEY = os.getenv("VOLC_REALTIME_SECRET_KEY")
+# Volcengine Realtime Voice API config - New Console (API Key method)
+# CRITICAL: Must be set via Railway environment variables
+# New console uses unified API Key authentication (no App ID/Access Token needed)
+VOLC_REALTIME_API_KEY = os.getenv("VOLC_REALTIME_API_KEY")
 
-if not all([VOLC_REALTIME_APP_ID, VOLC_REALTIME_ACCESS_KEY, VOLC_REALTIME_SECRET_KEY]):
+if not VOLC_REALTIME_API_KEY:
     raise ValueError(
-        "Volcengine Realtime credentials must be set via environment variables:\n"
-        "  - VOLC_REALTIME_APP_ID\n"
-        "  - VOLC_REALTIME_ACCESS_KEY\n"
-        "  - VOLC_REALTIME_SECRET_KEY"
+        "Volcengine Realtime API Key must be set via environment variable:\n"
+        "  - VOLC_REALTIME_API_KEY (from 火山引擎 Speech Console > API Key Management)"
     )
-
-# Doubao TTS 2.0 V3 API config (天才童声 官方音色)
-# X-Api-App-Id 复用火山引擎 APP_ID，X-Api-Access-Key 复用 Access Key
-VOLC_TTS_V3_APP_ID = os.getenv("VOLC_TTS_V3_APP_ID", VOLC_REALTIME_APP_ID)
-VOLC_TTS_V3_ACCESS_KEY = os.getenv("VOLC_TTS_V3_ACCESS_KEY", VOLC_REALTIME_ACCESS_KEY)
-VOLC_TTS_V3_RESOURCE_ID = os.getenv("VOLC_TTS_V3_RESOURCE_ID", "seed-tts-2.0")
-VOLC_TTS_V3_VOICE_TYPE = os.getenv("VOLC_TTS_V3_VOICE_TYPE", "zh_male_tiancaitongsheng_uranus_bigtts")
-VOLC_TTS_V3_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
 
