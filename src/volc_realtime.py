@@ -10,54 +10,52 @@ logger = logging.getLogger("volc_realtime")
 class VolcRealtimeClient:
     """
     Volcengine Realtime S2S v3 Duplex client (Seeduplex) for low-latency voice interaction.
+    Uses NEW CONSOLE API Key authentication (not old App ID/Access Token).
+    
     Connects to wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue
-    with headers:
-      - X-Api-App-ID
-      - X-Api-Key
-      - X-Api-Resource-Id
+    with header:
+      - X-Api-Key (from 火山引擎 Speech Console > API Key Management)
     """
     def __init__(
         self,
-        app_id: Optional[str] = None,
-        access_key: Optional[str] = None,
-        secret_key: Optional[str] = None,
-        resource_id: Optional[str] = None,
+        api_key: Optional[str] = None,
         uri: str = "wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue"
     ):
-        # Get from parameters or environment variables
+        # Get API Key from parameter or environment variable
         # CRITICAL: No hardcoded defaults - credentials must come from Railway env vars
-        self.app_id = app_id or os.getenv("VOLC_REALTIME_APP_ID")
-        self.access_key = access_key or os.getenv("VOLC_REALTIME_ACCESS_KEY")
-        self.secret_key = secret_key or os.getenv("VOLC_REALTIME_SECRET_KEY")
-        self.resource_id = resource_id or os.getenv("VOLC_REALTIME_RESOURCE_ID", "volc.speech.dialog")
+        self.api_key = api_key or os.getenv("VOLC_REALTIME_API_KEY")
         self.uri = uri
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         
         # Validate required credentials
-        if not self.app_id:
-            raise ValueError("VOLC_REALTIME_APP_ID must be provided or set in environment")
-        if not self.access_key:
-            raise ValueError("VOLC_REALTIME_ACCESS_KEY must be provided or set in environment")
+        if not self.api_key:
+            raise ValueError(
+                "VOLC_REALTIME_API_KEY must be provided or set in environment. "
+                "Get it from: 火山引擎 Speech Console > API Key Management"
+            )
 
     def _get_headers(self) -> Dict[str, str]:
-        # Volcengine v3 duplex realtime API requires:
-        #   X-Api-App-ID     — the numeric/string App ID
-        #   X-Api-Access-Key — the access key (may be UUID format from console)
-        #   X-Api-Resource-Id — the resource/product id (e.g. "volc.speech.dialog")
-        access_key = (self.access_key or "").strip()
-        app_id_stripped = str(self.app_id).strip()
-        resource_id_stripped = str(self.resource_id).strip()
+        """
+        Build WebSocket handshake headers for new console API Key authentication.
+        
+        NEW CONSOLE (Seeduplex):
+          X-Api-Key — the unified API Key from console API Key management
+          
+        Reference: https://www.volcengine.com/docs/6561/2534847?lang=zh
+        """
+        api_key_stripped = (self.api_key or "").strip()
+        
+        if not api_key_stripped:
+            raise ValueError("API Key cannot be empty")
 
         return {
-            "X-Api-App-ID": app_id_stripped,
-            "X-Api-Access-Key": access_key,
-            "X-Api-Resource-Id": resource_id_stripped,
+            "X-Api-Key": api_key_stripped,
         }
 
     async def connect(self):
         """Establish WebSocket connection with required handshake headers."""
         headers = self._get_headers()
-        logger.info(f"[VolcRealtime] Connecting to {self.uri} | App-ID: {self.app_id} | Resource-ID: {self.resource_id} | Access-Key: {(self.access_key or '')[:8]}...")
+        logger.info(f"[VolcRealtime] Connecting to {self.uri} | API-Key: {(self.api_key or '')[:8]}...")
         try:
             self.websocket = await websockets.connect(
                 self.uri,
@@ -75,6 +73,16 @@ class VolcRealtimeClient:
         payload = json.dumps(event_data, ensure_ascii=False)
         logger.debug(f"[VolcRealtime] Sending event: {event_data.get('type')}")
         await self.websocket.send(payload)
+
+    async def session_create(self, session_config: Dict[str, Any]):
+        """
+        Send session.create event to initialize session with model parameters.
+        """
+        event = {
+            "type": "session.create",
+            "session": session_config
+        }
+        await self.send_event(event)
 
     async def session_update(self, session_config: Dict[str, Any]):
         """
@@ -94,6 +102,15 @@ class VolcRealtimeClient:
         event = {
             "type": "input_audio_buffer.append",
             "audio": audio_base64
+        }
+        await self.send_event(event)
+
+    async def commit_audio_buffer(self):
+        """
+        Send input_audio_buffer.commit event to signal end of audio input.
+        """
+        event = {
+            "type": "input_audio_buffer.commit"
         }
         await self.send_event(event)
 
