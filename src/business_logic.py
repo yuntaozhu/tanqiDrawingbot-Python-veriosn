@@ -207,9 +207,23 @@ def check_assistant_drawing_trigger(text: str) -> bool:
     return False
 
 
-def extract_drawing_subject(text: str) -> str:
+def extract_drawing_subject(text: str, conversation_context: Optional[Dict] = None) -> str:
     if not text:
         return ""
+
+    vague_commands = ["画出来", "画一下", "画画", "给我画"]
+
+    # When the user issues a vague command, look back at the conversation
+    # history to find the actual drawing subject mentioned earlier.
+    if text.strip() in vague_commands and conversation_context:
+        message_history = conversation_context.get("message_history", []) or []
+        for msg in reversed(message_history[-5:]):
+            user_text = (msg or {}).get("user_text", "")
+            if user_text and "画" not in user_text:
+                recovered_subject = user_text.strip()
+                print(f"[DEBUG] [DRAWING] Vague command '{text.strip()}' resolved to subject from history: '{recovered_subject}'")
+                return recovered_subject
+
     # Remove common prefixes
     prefixes = [
         "我想画一个", "我想画一幅", "我想画一只", "我想画一条", "我想画一张", "我想画个", "我想画只", "我想画张", "我想画条", "我想画些", "我想画", 
@@ -237,9 +251,9 @@ def extract_drawing_subject(text: str) -> str:
     return subject.strip()
 
 
-def extract_drawing_subject_advanced(user_text: str, assistant_reply: str) -> str:
-    # 1. Try to extract from user_text using prefixes
-    subject = extract_drawing_subject(user_text)
+def extract_drawing_subject_advanced(user_text: str, assistant_reply: str, conversation_context: Optional[Dict] = None) -> str:
+    # 1. Try to extract from user_text using prefixes (and conversation history for vague commands)
+    subject = extract_drawing_subject(user_text, conversation_context)
     if subject and len(subject) > 0 and subject not in ["画", "画画", "画图", "一幅画", "一幅", "画个"]:
         return subject
         
@@ -282,6 +296,7 @@ def extract_drawing_subject_advanced(user_text: str, assistant_reply: str) -> st
 
 async def async_generate_drawing(subject: str, device_token: str = None) -> Optional[Dict[str, Any]]:
     """Generates drawing line art asynchronously in parallel with text generation, leveraging Redis/memory cache."""
+    print(f"[DRAWING] Final prompt: {subject}")
     cache_mgr = DrawingCacheManager.get_instance()
     cached = cache_mgr.get(subject)
     if cached:
@@ -374,6 +389,7 @@ async def async_generate_drawing_with_fusion(
     Generates drawing line art asynchronously using fused_prompt and persists history.
     """
     print(f"[DEBUG] [ASYNC_DRAW] Using fused prompt: {fused_prompt[:100]}...")
+    print(f"[DRAWING] Final prompt: {fused_prompt}")
     start_time = time.time()
     
     cache_mgr = DrawingCacheManager.get_instance()
@@ -648,7 +664,9 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                     
                 # 3. If requires_drawing is True but drawing_prompt is empty, extract from user transcript or assistant reply
                 if requires_drawing and not drawing_prompt.strip():
-                    extracted = extract_drawing_subject_advanced(user_text, text_response)
+                    from src.conversation_crud import ConversationManager
+                    conv_context = ConversationManager.get_conversation_context(device_token)
+                    extracted = extract_drawing_subject_advanced(user_text, text_response, conv_context)
                     if extracted:
                         logger.debug(f"[HEURISTIC] Extracted drawing prompt '{extracted}' from transcript/reply.")
                         drawing_prompt = extracted
@@ -967,7 +985,9 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
                 should_draw = True
                 
             if should_draw:
-                prompt = extract_drawing_subject_advanced(user_text, text_response)
+                from src.conversation_crud import ConversationManager
+                conv_context = ConversationManager.get_conversation_context(device_token)
+                prompt = extract_drawing_subject_advanced(user_text, text_response, conv_context)
                 if not prompt or prompt.strip() == "":
                     prompt = "可爱的小兔子"
                 
