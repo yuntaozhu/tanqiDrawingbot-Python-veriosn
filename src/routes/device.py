@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import uuid
 import time
@@ -123,7 +124,8 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
             logger.debug(f"  - All Elements After: {fusion_result.get('all_elements_after', [])}")
 
             drawing_prompt = fusion_result.get("fused_prompt", user_text)
-            subject = fusion_result.get("target_element") or extract_drawing_subject(user_text) or "可爱"
+            subject = fusion_result.get("target_element") or extract_drawing_subject(user_text, context) or "可爱"
+            print(f"[DRAWING] Final prompt: {drawing_prompt}")
             
             # Check Cache (using fused_prompt as cache key)
             cache_mgr = DrawingCacheManager.get_instance()
@@ -171,6 +173,30 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
                 yield f"data: {safe_chunk}\n\n"
         except Exception as stream_err:
             logger.error(f"[CHAT_SSE] Text streaming error: {stream_err}")
+
+        # Convert AI response text to speech via TTS and send it as an SSE event so
+        # the client can play it back immediately.
+        if ai_response_text.strip():
+            try:
+                deepseek = DeepSeekAPI.get_instance()
+                voice_config = "一个极其温柔、友好、可爱的5岁小朋友，用稚嫩温和的语气说话"
+                audio_bytes = await asyncio.to_thread(
+                    deepseek.generate_speech_bytes, ai_response_text, voice_config
+                )
+
+                if audio_bytes:
+                    audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+                    audio_event = {
+                        "type": "ai_response_audio",
+                        "audio": audio_base64,
+                        "text": ai_response_text
+                    }
+                    yield f"data: {json.dumps(audio_event, ensure_ascii=False)}\n\n"
+                    logger.info(f"[CHAT_SSE] AI audio sent ({len(audio_bytes)} bytes)")
+                else:
+                    logger.warning("[CHAT_SSE] TTS returned empty audio, skipping ai_response_audio event")
+            except Exception as tts_err:
+                logger.error(f"[CHAT_SSE] TTS error: {tts_err}")
 
         # Wait for parallel drawing generation if triggered
         if drawing_task:
