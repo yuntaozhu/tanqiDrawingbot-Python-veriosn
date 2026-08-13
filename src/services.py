@@ -23,6 +23,7 @@ from src.config import (
     VOLC_TTS_V3_VOICE_TYPE, VOLC_TTS_V3_URL
 )
 from src.utils import retry_with_backoff, preprocess_audio, get_image_metadata
+from tts_conversion_helper import convert_audio_to_target_samplerate
 from src.volc_realtime import VolcRealtimeClient
 
 CACHE_FILE = "image_cache.json"
@@ -369,6 +370,8 @@ class DeepSeekAPI:
         if not audio_bytes:
             raise RuntimeError("Doubao TTS V3 returned empty audio")
         print(f"[DEBUG] [TTS_V3] Success! Received {len(audio_bytes)} bytes of audio.")
+        # Fix Android AudioTrack underrun: convert to 24000 Hz
+        audio_bytes = convert_audio_to_target_samplerate(audio_bytes, target_sr=24000)
         return audio_bytes
 
     @retry_with_backoff(max_retries=2)
