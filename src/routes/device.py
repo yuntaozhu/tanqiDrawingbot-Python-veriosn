@@ -93,40 +93,79 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
         user_text_lower = user_text.lower()
         should_draw = any(kw in user_text_lower for kw in drawing_keywords)
 
+        # ✅ 检测"画出来"等模糊命令 - 用户之前已描述内容,现在只是下达绘画指令
+        explicit_draw_commands = ["画出来", "开始画", "给我画", "帮我画", "执行绘画"]
+        is_explicit_draw_command = user_text.strip() in explicit_draw_commands
+
         drawing_task = None
         action_result = None
         fusion_result = {}
         operation = {"type": "create", "confidence": 1.0}
 
         if should_draw:
-            logger.debug(f"[INTEGRATION] Preparing fusion for prompt: {user_text}")
-            fusion_inputs = ConversationContextManager.prepare_fusion_inputs(user_text, context)
-            operation = fusion_inputs["operation"]
-            logger.debug(f"[INTEGRATION] Recognized operation: {operation['type']} (confidence: {operation['confidence']})")
-            
-            # If confidence is low (< 0.5), we downgrade to create or fallback to simple subject extraction
-            if operation.get("confidence", 0.0) < 0.5:
+            if is_explicit_draw_command:
+                # ✅ 显式绘画命令: 从对话历史中查找用户之前描述的完整内容
+                logger.info(f"[DRAWING] Explicit draw command detected: {user_text}")
+
+                drawing_prompt = None
+                message_history = context.get("message_history", []) or []
+
+                # 从最近往回查,找第一条不包含"画"的用户消息(那是描述内容)
+                for msg in reversed(message_history[-10:]):  # 查最近10条
+                    msg_user_text = (msg or {}).get("user_text", "").strip()
+                    if msg_user_text and "画" not in msg_user_text:
+                        drawing_prompt = msg_user_text
+                        logger.info(f"[DRAWING] Found description in history: {drawing_prompt}")
+                        break
+
+                if not drawing_prompt:
+                    drawing_prompt = "可爱的小动物"
+                    logger.warning(f"[DRAWING] No description in history, using default: {drawing_prompt}")
+
+                fusion_result = {
+                    "fused_prompt": drawing_prompt,
+                    "operation": "create",
+                    "target_element": drawing_prompt,
+                    "all_elements_after": [drawing_prompt]
+                }
                 operation["type"] = "create"
 
-            fusion_result = PromptFusionEngine.fuse_drawing_prompt(
-                current_user_text=user_text,
-                operation_type=operation["type"],
-                previous_prompt=fusion_inputs["previous_prompt"],
-                scene_elements=fusion_inputs["scene_elements"]
-            )
-            
-            # Sync the final operation type (in case it was downgraded/adjusted by the fusion engine)
-            operation["type"] = fusion_result.get("operation", operation["type"])
+            else:
+                # 正常流程: 用户描述了想要的东西,同时说了"画"
+                logger.debug(f"[INTEGRATION] Preparing fusion for prompt: {user_text}")
+                fusion_inputs = ConversationContextManager.prepare_fusion_inputs(user_text, context)
+                operation = fusion_inputs["operation"]
+                logger.debug(f"[INTEGRATION] Recognized operation: {operation['type']} (confidence: {operation['confidence']})")
 
-            logger.debug(f"[INTEGRATION] Fusion complete:")
-            logger.debug(f"  - Fused Prompt: {fusion_result.get('fused_prompt', '')[:100]}...")
-            logger.debug(f"  - Target Element: {fusion_result.get('target_element')}")
-            logger.debug(f"  - All Elements After: {fusion_result.get('all_elements_after', [])}")
+                # If confidence is low (< 0.5), we downgrade to create or fallback to simple subject extraction
+                if operation.get("confidence", 0.0) < 0.5:
+                    operation["type"] = "create"
+
+                fusion_result = PromptFusionEngine.fuse_drawing_prompt(
+                    current_user_text=user_text,
+                    operation_type=operation["type"],
+                    previous_prompt=fusion_inputs["previous_prompt"],
+                    scene_elements=fusion_inputs["scene_elements"]
+                )
+
+                # Sync the final operation type (in case it was downgraded/adjusted by the fusion engine)
+                operation["type"] = fusion_result.get("operation", operation["type"])
+
+                logger.debug(f"[INTEGRATION] Fusion complete:")
+                logger.debug(f"  - Fused Prompt: {fusion_result.get('fused_prompt', '')[:100]}...")
+                logger.debug(f"  - Target Element: {fusion_result.get('target_element')}")
+                logger.debug(f"  - All Elements After: {fusion_result.get('all_elements_after', [])}")
 
             drawing_prompt = fusion_result.get("fused_prompt", user_text)
             subject = fusion_result.get("target_element") or extract_drawing_subject(user_text, context) or "可爱"
+
+            # ✅ 关键日志:打印完整的绘画提示词
+            logger.info(f"[DRAWING] ========== FINAL DRAWING PROMPT ==========")
+            logger.info(f"[DRAWING] User said: {user_text}")
+            logger.info(f"[DRAWING] Will draw: {drawing_prompt}")
+            logger.info(f"[DRAWING] ==========================================")
             print(f"[DRAWING] Final prompt: {drawing_prompt}")
-            
+
             # Check Cache (using fused_prompt as cache key)
             cache_mgr = DrawingCacheManager.get_instance()
             cached_action = cache_mgr.get(drawing_prompt)
