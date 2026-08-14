@@ -345,7 +345,7 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
     try:
         processed_image, bitmap_hex, prompt = await asyncio.wait_for(
             asyncio.to_thread(_generate_sync),
-            timeout=45.0
+            timeout=60.0
         )
     except asyncio.TimeoutError:
         print(f"[ERROR] [ASYNC_DRAW] Image generation timed out after 45s")
@@ -449,30 +449,38 @@ async def async_generate_drawing_with_fusion(
     try:
         processed_image, bitmap_hex = await asyncio.wait_for(
             asyncio.to_thread(_generate_sync),
-            timeout=45.0
+            timeout=60.0
         )
     except asyncio.TimeoutError:
         print(f"[ERROR] [ASYNC_DRAW] Image generation with fusion timed out after 45s")
         processed_image, bitmap_hex = None, None
 
-    if processed_image:
+    if processed_image and isinstance(processed_image, str) and len(processed_image.strip()) > 0:
         job_id = str(uuid.uuid4())
-        save_print_job_to_db({
-            "job_id": job_id,
-            "image_url": processed_image,
-            "bitmap_hex": bitmap_hex,
-            "prompt": fusion_result.get("target_element") or fused_prompt,
-            "timestamp": time.time()
-        })
+        logger.info(f"[ASYNC_DRAW] ✅ Image generation successful, saving to PrintJob... URL length: {len(processed_image)}")
+        
+        try:
+            save_print_job_to_db({
+                "job_id": job_id,
+                "image_url": processed_image,
+                "bitmap_hex": bitmap_hex,
+                "prompt": fusion_result.get("target_element") or fused_prompt,
+                "timestamp": time.time()
+            })
+        except Exception as db_err:
+            logger.error(f"[ASYNC_DRAW] Failed to save PrintJob: {db_err}")
 
         from src.conversation_crud import ConversationManager
-        ConversationManager.save_drawing_record(
-            job_id=job_id,
-            device_token=device_token,
-            operation_type=fusion_result.get("operation"),
-            scene_prompt=fused_prompt,
-            image_url=processed_image
-        )
+        try:
+            ConversationManager.save_drawing_record(
+                job_id=job_id,
+                device_token=device_token,
+                operation_type=fusion_result.get("operation"),
+                scene_prompt=fused_prompt,
+                image_url=processed_image
+            )
+        except Exception as history_err:
+            logger.error(f"[ASYNC_DRAW] Failed to save DrawingHistory: {history_err}")
 
         action = {
             "type": "draw",
@@ -490,8 +498,11 @@ async def async_generate_drawing_with_fusion(
         duration = time.time() - start_time
         print(f"[DEBUG] [ASYNC_DRAW] Image generated with fusion and cached in {duration:.2f}s, job_id: {job_id}")
         return action
-
-    return None
+    else:
+        logger.error(f"[ASYNC_DRAW] ❌ Image generation failed or returned empty result")
+        logger.error(f"[ASYNC_DRAW] processed_image type: {type(processed_image)}, value: {processed_image}")
+        logger.error(f"[ASYNC_DRAW] Attempted prompt: {fused_prompt[:100]}")
+        return None
 
 
 async def stream_chat_llm(user_text: str):
