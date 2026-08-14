@@ -92,35 +92,6 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
             "去掉", "擦掉", "删除", "不要", "变成", "改色",
             "爱", "爱一下", "爱一个", "我爱", "喜欢", "喜欢画"
         ]
-        drawing_keywords = [
-            "画", "画画", "画一个", "画一只", "画一架", "画辆", "画朵", "画条", "画张", "画一幅", 
-            "画个", "画出", "画一画", "想要画", "帮我画", "可以画", "画出来",
-            "增加", "加一个", "加个", "添一个", "多一个", "再画", "旁边加", "添加", "加上", 
-            "去掉", "擦掉", "删除", "不要", "变成", "改色",
-            "爱", "爱一下", "爱一个", "我爱", "喜欢", "喜欢画"
-        ]
-        drawing_keywords = [
-            "画", "画画", "画一个", "画一只", "画一架", "画辆", "画朵", "画条", "画张", "画一幅", 
-            "画个", "画出", "画一画", "想要画", "帮我画", "可以画", "画出来",
-            "增加", "加一个", "加个", "添一个", "多一个", "再画", "旁边加", "添加", "加上", 
-            "去掉", "擦掉", "删除", "不要", "变成", "改色",
-            "爱", "爱一下", "爱一个", "我爱", "喜欢", "喜欢画"
-        ]
-        drawing_keywords = [
-            "画", "画画", "画一个", "画一只", "画一架", "画辆", "画朵", "画条", "画张", "画一幅", 
-            "画个", "画出", "画一画", "想要画", "帮我画", "可以画", "画出来",
-            "增加", "加一个", "加个", "添一个", "多一个", "再画", "旁边加", "添加", "加上", 
-            "去掉", "擦掉", "删除", "不要", "变成", "改色",
-            "爱", "爱一下", "爱一个", "我爱", "喜欢", "喜欢画"
-        ]
-        drawing_keywords = [
-            "画", "画画", "画一个", "画一只", "画一架", "画辆", "画朵", "画条", "画张", "画一幅", 
-            "画个", "画出", "画一画", "想要画", "帮我画", "可以画", "画出来",
-            "增加", "加一个", "加个", "添一个", "多一个", "再画", "旁边加", "添加", "加上", 
-            "去掉", "擦掉", "删除", "不要", "变成", "改色",
-            "爱", "爱一下", "爱一个", "我爱", "喜欢", "喜欢画"
-        ]
-        ]
         user_text_lower = user_text.lower()
         should_draw = any(kw in user_text_lower for kw in drawing_keywords)
 
@@ -148,7 +119,6 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
                         drawing_prompt = msg_user_text
                         logger.info(f"[DRAWING] Found description in history: {drawing_prompt}")
                         break
-
                 if not drawing_prompt:
                     # 尝试用 LLM Refiner 从整个对话历史提炼
                     logger.info(f"[DRAWING] Attempting LLM Refiner to extract prompt from conversation...")
