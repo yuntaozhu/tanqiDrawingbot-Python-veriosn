@@ -15,6 +15,7 @@ from src.business_logic import (
     process_llm_interaction, stream_chat_llm, async_generate_drawing, extract_drawing_subject, async_generate_drawing_with_fusion
 )
 from src.cache import DrawingCacheManager
+from src.prompt_refiner import PromptRefinerEngine
 from src.logger import setup_logger
 from src.conversation_crud import ConversationManager
 from src.operation_recognizer import OperationRecognizer
@@ -119,8 +120,15 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
                         break
 
                 if not drawing_prompt:
-                    drawing_prompt = "可爱的小动物"
-                    logger.warning(f"[DRAWING] No description in history, using default: {drawing_prompt}")
+                    # 尝试用 LLM Refiner 从整个对话历史提炼
+                    logger.info(f"[DRAWING] Attempting LLM Refiner to extract prompt from conversation...")
+                    refined = PromptRefinerEngine.refine_from_conversation_history(token, last_n=10)
+                    if refined:
+                        drawing_prompt = refined
+                        logger.info(f"[DRAWING] LLM Refiner result: {drawing_prompt}")
+                    else:
+                        drawing_prompt = "可爱的小动物"
+                        logger.warning(f"[DRAWING] LLM Refiner failed, using default: {drawing_prompt}")
 
                 fusion_result = {
                     "fused_prompt": drawing_prompt,
@@ -241,7 +249,7 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
         if drawing_task:
             try:
                 wait_seconds = 0
-                max_wait_seconds = 45
+                max_wait_seconds = 60
                 while not drawing_task.done() and wait_seconds < max_wait_seconds:
                     try:
                         action_result = await asyncio.wait_for(asyncio.shield(drawing_task), timeout=1.0)
@@ -303,6 +311,7 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
         # Yield final action payload in the last SSE data frame
         final_payload = {
             "action": action_result,
+            "refined_prompt": action_result.get("fused_prompt") if action_result else None,
             "context": {
                 "scene_elements": updated_ctx.get("scene_elements", []),
                 "message_count": len(updated_ctx.get("message_history", []))

@@ -1,0 +1,22 @@
+# 在 async_generate_drawing_with_fusion 中添加错误处理和 image_url 检查
+# 修改位置: 大约 line 450-460
+
+# BEFORE:
+#    if processed_image:
+#        job_id = str(uuid.uuid4())
+#        save_print_job_to_db({
+#            "job_id": job_id,
+#            "image_url": processed_image,
+
+# AFTER: 添加检查和详细错误日志
+#    if processed_image and processed_image.strip():  # 检查 image_url 不为空
+#        job_id = str(uuid.uuid4())
+#        logger.info(f"[ASYNC_DRAW] ✅ Image generation successful, saving to PrintJob...")
+#        save_print_job_to_db({
+#            "job_id": job_id,
+#            "image_url": processed_image,
+#    else:
+#        logger.error(f"[ASYNC_DRAW] ❌ Image generation failed or empty, NOT saving to PrintJob")
+#        logger.error(f"[ASYNC_DRAW] Attempted prompt: {fused_prompt}")
+#        return None
+
