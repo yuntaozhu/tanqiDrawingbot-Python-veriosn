@@ -119,7 +119,6 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
                         drawing_prompt = msg_user_text
                         logger.info(f"[DRAWING] Found description in history: {drawing_prompt}")
                         break
-
                 if not drawing_prompt:
                     # 尝试用 LLM Refiner 从整个对话历史提炼
                     logger.info(f"[DRAWING] Attempting LLM Refiner to extract prompt from conversation...")
