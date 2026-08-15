@@ -461,7 +461,8 @@ def send_voice_command():
 
 def check_print_jobs():
     """
-    Polls for new print jobs from the queue.
+    Polls for user-confirmed print jobs only (status=queued).
+    Ready preview drawings are NOT returned here.
     """
     url = f"{BASE_URL}/api/device/v1/print-jobs"
     headers = get_headers()
@@ -472,7 +473,7 @@ def check_print_jobs():
             job = res.json()
             res.close()
             if job.get('has_job'):
-                log(f">>> NEW PRINT JOB RECEIVED: {job.get('job_id')}")
+                log(f">>> USER-CONFIRMED PRINT JOB: {job.get('job_id')}")
                 log(f"    Prompt: {job.get('prompt')}", "DEBUG")
                 return job
             return None
@@ -490,6 +491,43 @@ def check_print_jobs():
         log(f"Exception in poll: {e}", "ERROR")
         return None
 
+def check_ready_drawings():
+    """Poll for generated drawings waiting for the user to tap Print (preview only)."""
+    url = f"{BASE_URL}/api/device/v1/drawings/ready"
+    headers = get_headers()
+    try:
+        res = session.get(url, headers=headers, allow_redirects=False, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            res.close()
+            return data
+        res.close()
+        return None
+    except Exception as e:
+        log(f"Exception polling ready drawings: {e}", "ERROR")
+        return None
+
+def confirm_and_print_job(job_id):
+    """Simulate user tapping the Print button, then download preview and complete."""
+    url = f"{BASE_URL}/api/device/v1/print-jobs/{job_id}/print"
+    try:
+        res = session.post(url, headers=get_headers(), timeout=20)
+        if res.status_code != 200:
+            log(f"Confirm print failed {res.status_code}: {res.text[:200]}", "ERROR")
+            res.close()
+            return None
+        job = res.json()
+        res.close()
+        log(f"🖨️ 已确认打印: '{job.get('prompt')}' (job={job_id})")
+        image_url = job.get('image_url')
+        if image_url and image_url.startswith('data:image'):
+            save_image(image_url, job.get('job_id'))
+        complete_print_job(job_id)
+        return job
+    except Exception as e:
+        log(f"Exception confirming print: {e}", "ERROR")
+        return None
+
 def complete_print_job(job_id):
     """
     Marks a print job as successfully processed/completed.
@@ -505,6 +543,24 @@ def complete_print_job(job_id):
         res.close()
     except Exception as e:
         log(f"Exception completing job: {e}")
+
+_seen_ready_jobs = set()
+
+def preview_ready_drawings_once():
+    """Download newly ready drawings for screen preview; do NOT auto-print."""
+    data = check_ready_drawings()
+    if not data or not data.get("has_drawing"):
+        return
+    for drawing in data.get("drawings") or []:
+        job_id = drawing.get("job_id")
+        if not job_id or job_id in _seen_ready_jobs:
+            continue
+        _seen_ready_jobs.add(job_id)
+        prompt_text = drawing.get("prompt") or "简笔画"
+        log(f"🖼️ 画作已生成（待屏幕点击打印）: '{prompt_text}' job={job_id}")
+        image_url = drawing.get("image_url")
+        if image_url and image_url.startswith("data:image"):
+            save_image(image_url, job_id)
 
 def send_chat_command(text, silent=False):
     """
@@ -544,10 +600,14 @@ def send_chat_command(text, silent=False):
                 
             action = data.get('action')
             if action:
-                log(f"🎨 [绘画创作中] 探奇老师正在为你创作简笔画: {action.get('prompt')}")
+                status = action.get('status') or 'ready'
+                log(f"🎨 [绘画] status={status} prompt={action.get('prompt')}")
+                if status == 'generating':
+                    log("   画作后台生成中，完成后会出现在屏幕预览；需点击打印才会出纸")
                 image_url = action.get('image_url')
                 if image_url and image_url.startswith('data:image'):
                     save_image(image_url, action.get('job_id'))
+                    log("   已保存预览图（未自动打印）")
             res.close()
             return data
         elif res.status_code in [301, 302, 303, 307]:
@@ -644,10 +704,14 @@ def send_voice_file(filepath, silent=False):
                 
             action = data.get('action')
             if action:
-                log(f"🎨 [绘画创作中] 探奇老师触发了绘画简笔画: {action.get('prompt')}")
+                status = action.get('status') or 'ready'
+                log(f"🎨 [绘画] status={status} prompt={action.get('prompt')}")
+                if status == 'generating':
+                    log("   画作后台生成中，完成后会出现在屏幕预览；需点击打印才会出纸")
                 image_url = action.get('image_url')
                 if image_url and image_url.startswith('data:image'):
                     save_image(image_url, action.get('job_id'))
+                    log("   已保存预览图（未自动打印）")
             
             audio_b64 = data.get('audio_base64')
             if audio_b64:
@@ -675,22 +739,14 @@ def send_voice_file(filepath, silent=False):
         log(f"Exception sending voice file: {e}", "ERROR")
         return None
 
-def background_print_job_worker():
-    """Continuously polls for print jobs in the background and prints them seamlessly."""
+def background_preview_worker():
+    """Poll for ready drawings and save local previews. Does NOT auto-print."""
     while True:
         try:
-            job = check_print_jobs()
-            if job:
-                prompt_text = job.get('prompt') or '黑白简笔画'
-                log(f">>> 🤖 打印机收到新出纸任务! 正在输出黑白线稿: '{prompt_text}'")
-                image_url = job.get('image_url')
-                if image_url and image_url.startswith('data:image'):
-                    save_image(image_url, job.get('job_id'))
-                time.sleep(1.0)
-                complete_print_job(job['job_id'])
+            preview_ready_drawings_once()
         except Exception:
             pass
-        time.sleep(2.0)
+        time.sleep(3.0)
 
 # -----------------------------------------------------------------------------
 # Main Call / Dialogue Service
@@ -705,8 +761,7 @@ def start_realtime_call_service():
     print("   🧸 探奇智能玩偶（小探宝） 实时通话服务已启动 🧸   ")
     print("      在通话过程中，你可以直接对探奇倾诉或输入对话。")
     print("      探奇会聆听你的诉求，用温柔的语音回答你。")
-    print("      如果你要画画（例如：“画一只可爱小兔子”），")
-    print("      探奇会自动为你生成1-bit黑白简笔画，推送到你的打印机！")
+    print("      画作生成后仅在屏幕预览；点击「打印」按钮后才会出纸。")
     print("="*50)
     print(f"当前在线设备令牌: {DEVICE_TOKEN}")
     print(f"服务器端连接地址: {BASE_URL}")
@@ -716,11 +771,11 @@ def start_realtime_call_service():
         print("无法连接到服务器。请检查网络或服务器地址。退出中...")
         return
 
-    # Start background print job listener thread
+    # Preview-only worker (no auto print)
     import threading
-    t = threading.Thread(target=background_print_job_worker, daemon=True)
+    t = threading.Thread(target=background_preview_worker, daemon=True)
     t.start()
-    log("已启动后台打印机监听线程 (自动拉取并打印生成的简笔画)", "DEBUG")
+    log("已启动画作预览监听（生成后只下载预览，不会自动打印）", "DEBUG")
     
     # Select dialogue mode
     dialog_mode = "1" # Default to Auto-VAD
@@ -762,18 +817,19 @@ def start_realtime_call_service():
                 text = safe_input("\n你（打字）: ").strip()
                 if text.lower() == 'exit':
                     break
+                if text.lower() in ('p', 'print', '打印'):
+                    data = check_ready_drawings()
+                    latest = (data or {}).get("latest")
+                    if latest and latest.get("job_id"):
+                        confirm_and_print_job(latest["job_id"])
+                    else:
+                        log("当前没有待打印的画作预览。")
+                    continue
                 if text:
                     send_chat_command(text)
                     
-            # Brief check for print jobs in background during dialog
-            job = check_print_jobs()
-            if job:
-                log(f">>> 🤖 打印机打印任务自动触发! 正在输出简笔画: '{job.get('prompt')}'")
-                image_url = job.get('image_url')
-                if image_url and image_url.startswith('data:image'):
-                     save_image(image_url, job.get('job_id'))
-                time.sleep(1.5)
-                complete_print_job(job['job_id'])
+            # Preview only — never auto-print
+            preview_ready_drawings_once()
                 
     except KeyboardInterrupt:
         pass
@@ -814,7 +870,7 @@ def main():
     print("1. 📞 启动 实时多模态通话服务 (Real-time Voice & Text Dialogue Loop)")
     print("2. 💬 发送单次文本对话 (Single Chat Command)")
     print("3. 🎤 录制并发送单次语音 (Microphone Voice Command)")
-    print("4. 🖨️ 打印队列后台消费轮询 (Poll & Print jobs loop)")
+    print("4. 🖼️ 查看待打印画作 / 手动确认打印 (Preview & Confirm Print)")
     print("5. 🧪 模拟发送测试语音包 (Send dummy silent audio)")
     
     mode = safe_input("\n请输入选择 (1/2/3/4/5): ")
@@ -836,21 +892,19 @@ def main():
                  send_voice_file(filename)
                  
     elif mode == "4":
-        log(f"正在启动打印机循环轮询消费队列... (间隔: {POLL_INTERVAL}s)")
-        log("按下 Ctrl+C 可停止。")
-        try:
-            while True:
-                job = check_print_jobs()
-                if job:
-                    log(f"正在渲染并打印简笔画: {job.get('job_id')}")
-                    image_url = job.get('image_url')
-                    if image_url and image_url.startswith('data:image'):
-                         save_image(image_url, job.get('job_id'))
-                    time.sleep(3)
-                    complete_print_job(job['job_id'])
-                time.sleep(POLL_INTERVAL)
-        except KeyboardInterrupt:
-            log("轮询已停止。")
+        log("拉取待打印画作预览（不会自动出纸）...")
+        data = check_ready_drawings()
+        drawings = (data or {}).get("drawings") or []
+        if not drawings:
+            log("当前没有 status=ready 的画作。")
+        else:
+            for i, d in enumerate(drawings, 1):
+                log(f"  [{i}] {d.get('job_id')}  prompt='{d.get('prompt')}'")
+                if d.get("image_url") and d["image_url"].startswith("data:image"):
+                    save_image(d["image_url"], d.get("job_id"))
+            choice = safe_input("输入序号确认打印（回车取消）: ").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(drawings):
+                confirm_and_print_job(drawings[int(choice) - 1]["job_id"])
             
     elif mode == "5":
         log("正在模拟发送单次无声测试语音包...")

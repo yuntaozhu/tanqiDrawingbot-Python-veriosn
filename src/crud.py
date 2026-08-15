@@ -1,6 +1,6 @@
 import json
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from src.database import SessionLocal
 from src.models import (
     GenerationHistoryDB, FeedbackDB, PrintJobDB, PsychVectorDB, DeviceSettingsDB
@@ -83,10 +83,16 @@ def save_feedback_to_db(entry: Dict[str, Any]):
         db.close()
 
 def save_print_job_to_db(job: Dict[str, Any]):
+    """
+    Save a generated drawing. Default status is 'ready' (screen preview only).
+    Status 'queued' means the user tapped Print and the device may consume it.
+    """
     db = SessionLocal()
     try:
         db_job = PrintJobDB(
             job_id=job["job_id"],
+            device_token=job.get("device_token"),
+            status=job.get("status") or "ready",
             image_url=job["image_url"],
             bitmap_hex=job.get("bitmap_hex"),
             prompt=job["prompt"],
@@ -94,29 +100,80 @@ def save_print_job_to_db(job: Dict[str, Any]):
         )
         db.add(db_job)
         db.commit()
+        print(f"[DEBUG] [DB] Saved drawing job {job['job_id']} status={job.get('status') or 'ready'} token={job.get('device_token')}")
     except Exception as e:
         print(f"Error saving print job to DB: {e}")
         db.rollback()
     finally:
         db.close()
 
-def get_print_jobs_from_db() -> List[Dict[str, Any]]:
+def _job_to_dict(j: PrintJobDB) -> Dict[str, Any]:
+    return {
+        "job_id": j.job_id,
+        "device_token": getattr(j, "device_token", None),
+        "status": getattr(j, "status", None) or "ready",
+        "image_url": j.image_url,
+        "bitmap_hex": j.bitmap_hex,
+        "prompt": j.prompt,
+        "timestamp": j.timestamp,
+    }
+
+def get_print_jobs_from_db(device_token: str = None, status: str = "queued") -> List[Dict[str, Any]]:
+    """
+    By default only returns jobs the user confirmed for printing (status=queued).
+    Ready (preview) jobs are NOT returned here — use get_ready_drawings_from_db.
+    """
     db = SessionLocal()
     try:
-        jobs = db.query(PrintJobDB).order_by(PrintJobDB.timestamp.asc()).all()
-        return [
-            {
-                "job_id": j.job_id,
-                "image_url": j.image_url,
-                "bitmap_hex": j.bitmap_hex,
-                "prompt": j.prompt,
-                "timestamp": j.timestamp
-            }
-            for j in jobs
-        ]
+        q = db.query(PrintJobDB)
+        if status:
+            q = q.filter(PrintJobDB.status == status)
+        if device_token:
+            q = q.filter(PrintJobDB.device_token == device_token)
+        jobs = q.order_by(PrintJobDB.timestamp.asc()).all()
+        return [_job_to_dict(j) for j in jobs]
     except Exception as e:
         print(f"Error getting print jobs from DB: {e}")
         return []
+    finally:
+        db.close()
+
+def get_ready_drawings_from_db(device_token: str = None) -> List[Dict[str, Any]]:
+    """Return generated drawings waiting for user to tap Print (status=ready)."""
+    return get_print_jobs_from_db(device_token=device_token, status="ready")
+
+def get_print_job_by_id(job_id: str) -> Optional[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        j = db.query(PrintJobDB).filter(PrintJobDB.job_id == job_id).first()
+        return _job_to_dict(j) if j else None
+    except Exception as e:
+        print(f"Error getting print job {job_id}: {e}")
+        return None
+    finally:
+        db.close()
+
+def queue_print_job(job_id: str, device_token: str = None) -> Optional[Dict[str, Any]]:
+    """User tapped Print: mark ready → queued and return job payload for the device."""
+    db = SessionLocal()
+    try:
+        j = db.query(PrintJobDB).filter(PrintJobDB.job_id == job_id).first()
+        if not j:
+            return None
+        if device_token and getattr(j, "device_token", None) and j.device_token != device_token:
+            print(f"[WARNING] [DB] queue_print_job token mismatch for {job_id}")
+            return None
+        j.status = "queued"
+        if device_token and not getattr(j, "device_token", None):
+            j.device_token = device_token
+        db.commit()
+        db.refresh(j)
+        print(f"[DEBUG] [DB] Job {job_id} queued for printing")
+        return _job_to_dict(j)
+    except Exception as e:
+        print(f"Error queueing print job {job_id}: {e}")
+        db.rollback()
+        return None
     finally:
         db.close()
 
@@ -127,6 +184,25 @@ def delete_print_job_from_db(job_id: str):
         db.commit()
     except Exception as e:
         print(f"Error deleting print job from DB: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+def clear_legacy_auto_print_queue():
+    """Mark all existing jobs as ready so old auto-poll clients stop draining them as print jobs."""
+    db = SessionLocal()
+    try:
+        updated = 0
+        for j in db.query(PrintJobDB).all():
+            status = getattr(j, "status", None)
+            if status in (None, "", "queued", "pending"):
+                j.status = "ready"
+                updated += 1
+        if updated:
+            db.commit()
+            print(f"[INFO] [DB] Reset {updated} print_jobs to status=ready (manual print only)")
+    except Exception as e:
+        print(f"[WARNING] [DB] clear_legacy_auto_print_queue failed: {e}")
         db.rollback()
     finally:
         db.close()

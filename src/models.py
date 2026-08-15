@@ -33,6 +33,9 @@ class PrintJobDB(Base):
     __tablename__ = "print_jobs"
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(String, unique=True, index=True)
+    device_token = Column(String, index=True, nullable=True)
+    # ready = generated for screen preview; queued = user tapped Print; printed = done
+    status = Column(String, default="ready", index=True)
     image_url = Column(Text)
     bitmap_hex = Column(Text, nullable=True)
     prompt = Column(Text)

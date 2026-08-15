@@ -306,6 +306,7 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
         job_id = str(uuid.uuid4())
         action = {
             "type": "draw",
+            "status": "ready",
             "prompt": subject,
             "job_id": job_id,
             "image_url": cached.get("image_url"),
@@ -313,6 +314,8 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
         }
         save_print_job_to_db({
             "job_id": job_id,
+            "device_token": device_token,
+            "status": "ready",
             "image_url": cached.get("image_url"),
             "bitmap_hex": cached.get("bitmap_hex"),
             "prompt": subject,
@@ -357,6 +360,8 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
         job_id = str(uuid.uuid4())
         job_data = {
             "job_id": job_id,
+            "device_token": device_token,
+            "status": "ready",
             "image_url": processed_image,
             "bitmap_hex": bitmap_hex,
             "prompt": prompt,
@@ -366,6 +371,7 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
 
         action = {
             "type": "draw",
+            "status": "ready",
             "prompt": prompt,
             "job_id": job_id,
             "image_url": processed_image,
@@ -401,6 +407,8 @@ async def async_generate_drawing_with_fusion(
         job_id = str(uuid.uuid4())
         save_print_job_to_db({
             "job_id": job_id,
+            "device_token": device_token,
+            "status": "ready",
             "image_url": cached.get("image_url"),
             "bitmap_hex": cached.get("bitmap_hex"),
             "prompt": fusion_result.get("target_element") or fused_prompt,
@@ -418,6 +426,7 @@ async def async_generate_drawing_with_fusion(
         
         return {
             "type": "draw",
+            "status": "ready",
             "prompt": fusion_result.get("target_element"),
             "fused_prompt": fused_prompt,
             "operation": fusion_result.get("operation"),
@@ -459,11 +468,13 @@ async def async_generate_drawing_with_fusion(
 
     if processed_image and isinstance(processed_image, str) and len(processed_image.strip()) > 0:
         job_id = str(uuid.uuid4())
-        logger.info(f"[ASYNC_DRAW] ✅ Image generation successful, saving to PrintJob... URL length: {len(processed_image)}")
+        logger.info(f"[ASYNC_DRAW] ✅ Image ready for preview (manual print). URL length: {len(processed_image)}")
         
         try:
             save_print_job_to_db({
                 "job_id": job_id,
+                "device_token": device_token,
+                "status": "ready",
                 "image_url": processed_image,
                 "bitmap_hex": bitmap_hex,
                 "prompt": fusion_result.get("target_element") or fused_prompt,
@@ -486,6 +497,7 @@ async def async_generate_drawing_with_fusion(
 
         action = {
             "type": "draw",
+            "status": "ready",
             "prompt": fusion_result.get("target_element"),
             "fused_prompt": fused_prompt,
             "operation": fusion_result.get("operation"),
@@ -659,14 +671,14 @@ async def _background_drawing_and_record(
     text_response: str,
     drawing_prompt: str
 ):
-    """Background task to generate Seedream image, convert to 1-bit line art, and put into PrintJob queue."""
+    """Background task: generate Seedream line art and save as status=ready (screen preview). Does NOT auto-print."""
     draw_start = time.time()
     try:
         logger.info(f"[ASYNC_DRAW_BG] 🎨 Background drawing started for: '{fusion_input}' (token: {device_token})")
         action = await _execute_drawing_with_fusion(fusion_input, device_token, text_response)
         draw_duration = time.time() - draw_start
         if action:
-            logger.info(f"[ASYNC_DRAW_BG] ✅ Print job {action.get('job_id')} created in {draw_duration:.2f}s!")
+            logger.info(f"[ASYNC_DRAW_BG] ✅ Drawing {action.get('job_id')} ready for screen preview in {draw_duration:.2f}s (await user Print button)")
         else:
             logger.warning(f"[ASYNC_DRAW_BG] ⚠️ Drawing finished with no action returned ({draw_duration:.2f}s)")
     except Exception as e:
@@ -859,8 +871,9 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
                 )
                 action_preview = {
                     "type": "draw",
-                    "status": "generating_in_background",
-                    "prompt": drawing_prompt or fusion_input
+                    "status": "generating",
+                    "prompt": drawing_prompt or fusion_input,
+                    "message": "画作生成中，完成后请在屏幕点击打印按钮出纸"
                 }
 
             # 3. Update and persist message history to conversation context

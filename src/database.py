@@ -25,6 +25,30 @@ import time
 _db_initialized = False
 _db_init_lock = threading.Lock()
 
+def _migrate_print_jobs_columns():
+    """Add device_token/status to print_jobs if missing (Postgres/SQLite)."""
+    from sqlalchemy import text
+    stmts = [
+        "ALTER TABLE print_jobs ADD COLUMN device_token VARCHAR",
+        "ALTER TABLE print_jobs ADD COLUMN status VARCHAR DEFAULT 'ready'",
+    ]
+    with engine.begin() as conn:
+        for stmt in stmts:
+            try:
+                conn.execute(text(stmt))
+                print(f"[INFO] [DB] Migration applied: {stmt}")
+            except Exception as e:
+                # Column already exists — ignore
+                msg = str(e).lower()
+                if "duplicate" in msg or "already exists" in msg or "exists" in msg:
+                    pass
+                else:
+                    print(f"[DEBUG] [DB] Migration skip/fail ({stmt}): {e}")
+        try:
+            conn.execute(text("UPDATE print_jobs SET status = 'ready' WHERE status IS NULL OR status = '' OR status = 'pending'"))
+        except Exception as e:
+            print(f"[DEBUG] [DB] status backfill skip: {e}")
+
 def _ensure_db_initialized():
     global _db_initialized
     if _db_initialized:
@@ -34,6 +58,7 @@ def _ensure_db_initialized():
             return
         try:
             Base.metadata.create_all(bind=engine)
+            _migrate_print_jobs_columns()
         except Exception as e:
             print(f"[WARNING] Database initialization encountered error: {e}. Attempting to recreate database...")
             engine.dispose()
@@ -46,7 +71,13 @@ def _ensure_db_initialized():
                     except Exception as rm_err:
                         print(f"[ERROR] Failed to remove db file: {rm_err}")
             Base.metadata.create_all(bind=engine)
+            _migrate_print_jobs_columns()
             print("[INFO] Database recreated successfully.")
+        try:
+            from src.crud import clear_legacy_auto_print_queue
+            clear_legacy_auto_print_queue()
+        except Exception as e:
+            print(f"[DEBUG] [DB] clear_legacy_auto_print_queue skip: {e}")
         _db_initialized = True
 
 def initialize_db_schema():

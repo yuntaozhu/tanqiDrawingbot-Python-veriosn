@@ -9,7 +9,14 @@ from typing import Optional
 from urllib.parse import unquote
 from src.schemas import ChatRequest, TTSRequest
 from src.config import ARK_API_KEY, VOLC_REALTIME_API_KEY
-from src.crud import get_print_jobs_from_db, delete_print_job_from_db, save_print_job_to_db
+from src.crud import (
+    get_print_jobs_from_db,
+    delete_print_job_from_db,
+    save_print_job_to_db,
+    get_ready_drawings_from_db,
+    queue_print_job,
+    get_print_job_by_id,
+)
 from src.services import VoiceInteractionService, DoubaoAPI
 from src.business_logic import (
     process_llm_interaction, stream_chat_llm, async_generate_drawing, extract_drawing_subject, async_generate_drawing_with_fusion
@@ -182,16 +189,20 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
                 job_id = str(uuid.uuid4())
                 action_result = {
                     "type": "draw",
+                    "status": "ready",
                     "prompt": subject,
                     "fused_prompt": drawing_prompt,
                     "operation": operation["type"],
                     "scene_elements": fusion_result.get("all_elements_after"),
                     "job_id": job_id,
                     "image_url": cached_action.get("image_url"),
-                    "bitmap_hex": cached_action.get("bitmap_hex")
+                    "bitmap_hex": cached_action.get("bitmap_hex"),
+                    "message": "画作已生成，请在屏幕点击打印按钮出纸"
                 }
                 save_print_job_to_db({
                     "job_id": job_id,
+                    "device_token": token,
+                    "status": "ready",
                     "image_url": cached_action.get("image_url"),
                     "bitmap_hex": cached_action.get("bitmap_hex"),
                     "prompt": subject,
@@ -366,8 +377,29 @@ async def handle_voice(request: Request):
         logger.error(f"[VOICE] Server Error during processing: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/api/device/v1/drawings/ready")
+async def get_ready_drawings(request: Request):
+    """
+    List drawings generated for this device that are waiting for the user to tap Print.
+    Does NOT auto-print. Client should show preview on screen.
+    """
+    token = request.headers.get("x-device-token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    drawings = get_ready_drawings_from_db(device_token=token)
+    return {
+        "has_drawing": bool(drawings),
+        "count": len(drawings),
+        "drawings": drawings,
+        "latest": drawings[-1] if drawings else None,
+    }
+
 @router.get("/api/device/v1/print-jobs")
 async def get_print_jobs(request: Request):
+    """
+    Only returns jobs the user has confirmed via POST .../print (status=queued).
+    Ready preview drawings are NOT returned here — use GET /drawings/ready.
+    """
     token = request.headers.get("x-device-token")
     ua = request.headers.get("user-agent")
     
@@ -375,15 +407,37 @@ async def get_print_jobs(request: Request):
         print(f"[WARNING] [CONN] Unauthorized polling attempt from UA: {ua}")
         raise HTTPException(status_code=401, detail="Unauthorized")
         
-    jobs = get_print_jobs_from_db()
+    jobs = get_print_jobs_from_db(device_token=token, status="queued")
     if jobs:
         job = jobs[0]
-        print(f"[DEBUG] [PRINT] Job found: {job.get('job_id')} for prompt: '{job.get('prompt')}'")
+        print(f"[DEBUG] [PRINT] Queued job for device: {job.get('job_id')} prompt='{job.get('prompt')}'")
         return {
             "has_job": True,
             **job
         }
     return {"has_job": False}
+
+@router.post("/api/device/v1/print-jobs/{job_id}/print")
+async def confirm_print_job(job_id: str, request: Request):
+    """
+    User tapped the Print button on screen.
+    Marks the ready drawing as queued and returns payload for the device printer.
+    """
+    token = request.headers.get("x-device-token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    job = queue_print_job(job_id, device_token=token)
+    if not job:
+        raise HTTPException(status_code=404, detail="Drawing job not found or not owned by this device")
+
+    logger.info(f"[PRINT] User confirmed print for job {job_id} token={token[:5]}***")
+    return {
+        "success": True,
+        "has_job": True,
+        "message": "Print confirmed. Device may now print this drawing.",
+        **job
+    }
 
 @router.post("/api/device/v1/print-jobs/{job_id}/complete")
 async def complete_print_job(job_id: str, request: Request):
