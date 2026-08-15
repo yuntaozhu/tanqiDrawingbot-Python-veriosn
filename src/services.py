@@ -652,11 +652,49 @@ class DoubaoAPI:
         return embedding
 
     @retry_with_backoff(max_retries=2)
-    def _generate_embedding_raw(self, text: str) -> Optional[List[float]]:
-        # 1. SiliconFlow high-speed fallback
+    def _generate_embedding_raw(self, text: str, image_url: Optional[str] = None) -> Optional[List[float]]:
+        # 1. Primary: Doubao Multimodal Vision Embedding (doubao-embedding-vision-251215)
+        if self.api_key:
+            try:
+                url = f"{self.base_url}/embeddings/multimodal"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}"
+                }
+                input_items = [
+                    {
+                        "type": "text",
+                        "text": text
+                    }
+                ]
+                if image_url and image_url.startswith("http"):
+                    input_items.append({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    })
+                payload = {
+                    "model": EMBEDDING_MODEL_VISION or "doubao-embedding-vision-251215",
+                    "input": input_items
+                }
+                print(f"[DEBUG] [DOUBAO_EMBED] Calling Doubao multimodal embedding ({url}) with model {payload['model']}...")
+                resp = requests.post(url, json=payload, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    resp_json = resp.json()
+                    embedding = resp_json["data"][0]["embedding"]
+                    print(f"[DEBUG] [DOUBAO_EMBED] Multimodal embedding success! Vector dim: {len(embedding)}")
+                    self._consecutive_embedding_failures = 0
+                    return embedding
+                else:
+                    print(f"[ERROR] [DOUBAO_EMBED] Multimodal embedding HTTP {resp.status_code}: {resp.text}")
+            except Exception as e:
+                print(f"[WARNING] [DOUBAO_EMBED] Multimodal embedding failed: {e}. Falling back...")
+
+        # 2. Fallback: SiliconFlow BAAI/bge-m3
         if SILICONFLOW_API_KEY:
             try:
-                print(f"[DEBUG] [EMBED] Trying SiliconFlow with BAAI/bge-m3...")
+                print(f"[DEBUG] [EMBED] Trying SiliconFlow fallback with BAAI/bge-m3...")
                 sf_client = OpenAI(api_key=SILICONFLOW_API_KEY, base_url="https://api.siliconflow.cn/v1")
                 response = sf_client.embeddings.create(
                     model="BAAI/bge-m3",
@@ -669,10 +707,10 @@ class DoubaoAPI:
             except Exception as sf_err:
                 print(f"[WARNING] [EMBED] SiliconFlow embedding failed: {sf_err}")
 
-        # 2. OpenAI high-speed fallback
+        # 3. Fallback: OpenAI text-embedding-3-small
         if OPENAI_API_KEY:
             try:
-                print(f"[DEBUG] [EMBED] Trying OpenAI with text-embedding-3-small...")
+                print(f"[DEBUG] [EMBED] Trying OpenAI fallback with text-embedding-3-small...")
                 oa_client = OpenAI(api_key=OPENAI_API_KEY)
                 response = oa_client.embeddings.create(
                     model="text-embedding-3-small",
@@ -685,52 +723,7 @@ class DoubaoAPI:
             except Exception as oa_err:
                 print(f"[WARNING] [EMBED] OpenAI embedding failed: {oa_err}")
 
-        # 3. Doubao endpoints
-        if self.client and self.api_key:
-            # 3a. Multimodal Vision Embedding (Requires dedicated endpoint)
-            try:
-                url = f"{self.base_url}/embeddings/multimodal"
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}"
-                }
-                payload = {
-                    "model": EMBEDDING_MODEL_VISION,
-                    "input": [
-                        {
-                            "type": "text",
-                            "text": text
-                        }
-                    ]
-                }
-                print(f"[DEBUG] [DOUBAO_EMBED] Requesting vision embedding from {url} using {EMBEDDING_MODEL_VISION}...")
-                resp = requests.post(url, json=payload, headers=headers, timeout=10)
-                if resp.status_code == 200:
-                    resp_json = resp.json()
-                    embedding = resp_json["data"][0]["embedding"]
-                    print(f"[DEBUG] [DOUBAO_EMBED] Vision embedding success!")
-                    self._consecutive_embedding_failures = 0
-                    return embedding
-                else:
-                    print(f"[ERROR] [DOUBAO_EMBED] Vision embedding HTTP error {resp.status_code}: {resp.text}")
-                    raise RuntimeError(f"HTTP error {resp.status_code}: {resp.text}")
-            except Exception as e:
-                print(f"[ERROR] [DOUBAO_EMBED] Vision embedding failed: {e}. Falling back to Doubao text embedding...")
-                # 3b. Standard Text Embedding
-                try:
-                    print(f"[DEBUG] [DOUBAO_EMBED] Requesting text embedding with {EMBEDDING_MODEL_TEXT}...")
-                    response = self.client.embeddings.create(
-                        model=EMBEDDING_MODEL_TEXT,
-                        input=[text],
-                        timeout=10
-                    )
-                    print(f"[DEBUG] [DOUBAO_EMBED] Text embedding success!")
-                    self._consecutive_embedding_failures = 0
-                    return response.data[0].embedding
-                except Exception as e2:
-                    print(f"[ERROR] [DOUBAO_EMBED] Text embedding also failed: {e2}")
-
-        # 4. Pure fallback to dummy embedding to prevent crash/latency
+        # 4. Fallback to zero vector to prevent blocking/crash
         self._consecutive_embedding_failures = getattr(self, "_consecutive_embedding_failures", 0) + 1
         print(f"[CRITICAL_ALERT] [EMBED_DEGRADED] Embedding failure detected! (Consecutive failures: {self._consecutive_embedding_failures})")
         if self._consecutive_embedding_failures >= 5:

@@ -271,7 +271,7 @@ def play_audio(filepath):
     """
     Robust, fast cross-platform audio playback module.
     Attempts to play MP3 or WAV audio using native Python audio engines first,
-    falling back to common command-line utilities.
+    falling back to Windows Media / PowerShell / Command-line utilities.
     """
     if IS_MICROPYTHON:
          log("Audio playback not natively supported on raw MicroPython core without hardware DAC.", "WARNING")
@@ -283,7 +283,7 @@ def play_audio(filepath):
         
     log(f"播放探奇老师语音中 ({os.path.basename(filepath)})...", "DEBUG")
     
-    # 1. Ultra-fast Windows built-in winsound for WAV
+    # 1. Direct WAV playback via Windows winsound
     if sys.platform == "win32" and filepath.lower().endswith(".wav"):
         try:
             import winsound
@@ -292,17 +292,7 @@ def play_audio(filepath):
         except Exception:
             pass
 
-    # 2. Try fast python libraries (sounddevice / soundfile / pygame)
-    try:
-        import sounddevice as sd
-        import soundfile as sf
-        data, fs = sf.read(filepath)
-        sd.play(data, fs)
-        sd.wait()
-        return True
-    except (ImportError, Exception):
-        pass
-
+    # 2. Try python sound libraries (pygame / sounddevice+soundfile)
     try:
         import pygame
         pygame.mixer.init()
@@ -315,25 +305,53 @@ def play_audio(filepath):
     except (ImportError, Exception):
         pass
 
-    # 3. Play on Windows via PowerShell
+    try:
+        import sounddevice as sd
+        import soundfile as sf
+        data, fs = sf.read(filepath)
+        sd.play(data, fs)
+        sd.wait()
+        return True
+    except (ImportError, Exception):
+        pass
+
+    # 3. Windows Native PowerShell Media Player (Supports MP3 & WAV)
     if sys.platform == "win32":
         try:
             import subprocess
-            # Use COM object to support both WAV and MP3 natively
             abs_path = os.path.abspath(filepath)
-            cmd = ["powershell", "-c", f"$m = New-Object -ComObject WMPlayer.OCX; $m.URL = '{abs_path}'; while($m.playState -ne 1) {{ Start-Sleep -m 100 }}"]
+            # Use Windows Media Player COM with accurate state check
+            ps_script = (
+                f"$wmp = New-Object -ComObject WMPlayer.OCX; "
+                f"$m = $wmp.newMedia('{abs_path}'); "
+                f"$wmp.currentPlaylist.appendItem($m); "
+                f"$wmp.controls.play(); "
+                f"Start-Sleep -Milliseconds 400; "
+                f"while ($wmp.playState -eq 3 -or $wmp.playState -eq 6 -or $wmp.playState -eq 9) {{ Start-Sleep -Milliseconds 50 }}"
+            )
+            cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script]
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
         except:
-            # Fallback to SoundPlayer
             try:
-                cmd = ["powershell", "-c", f"(New-Object Media.SoundPlayer '{filepath}').PlaySync()"]
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # Fallback to presentationCore MediaPlayer
+                ps_script2 = (
+                    f"Add-Type -AssemblyName presentationCore; "
+                    f"$p = New-Object System.Windows.Media.MediaPlayer; "
+                    f"$p.Open('{abs_path}'); "
+                    f"Start-Sleep -Milliseconds 300; "
+                    f"$p.Play(); "
+                    f"while ($p.NaturalDuration.HasTimeSpan -eq $false) {{ Start-Sleep -Milliseconds 50 }}; "
+                    f"Start-Sleep -Seconds ([Math]::Ceiling($p.NaturalDuration.TimeSpan.TotalSeconds)); "
+                    f"$p.Close()"
+                )
+                cmd2 = ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script2]
+                subprocess.run(cmd2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return True
             except:
                 pass
-            
-    # 4. Play on macOS via afplay
+
+    # 4. macOS Native afplay
     if sys.platform == "darwin":
         try:
             import subprocess
@@ -342,8 +360,8 @@ def play_audio(filepath):
         except:
             pass
             
-    # 5. Generic Linux / Unix command-line utility fallbacks
-    players = ['ffplay', 'mpg123', 'mpv', 'aplay', 'paplay']
+    # 5. Linux / Cross-platform CLI players
+    players = ['ffplay', 'mpv', 'mpg123', 'aplay']
     for player in players:
         try:
             import subprocess
@@ -428,7 +446,9 @@ def send_voice_command():
             audio_b64 = data.get('audio_base64')
             if audio_b64:
                 log(f"Received Audio: {len(audio_b64)} characters (base64)", "DEBUG")
-                save_audio(audio_b64, "voice_response.mp3")
+                saved_path = save_audio(audio_b64, "voice_response.mp3")
+                if saved_path:
+                    play_audio(saved_path)
             res.close()
             return data
         else:
@@ -513,8 +533,9 @@ def send_chat_command(text, silent=False):
             # Save and play sound if returned
             audio_b64 = data.get('audio_base64')
             if audio_b64:
-                save_audio(audio_b64, "chat_response.mp3")
-                play_audio("response_chat_response.mp3")
+                saved_path = save_audio(audio_b64, "chat_response.mp3")
+                if saved_path:
+                    play_audio(saved_path)
             else:
                 text_response = data.get('text_response')
                 if text_response and not silent:
@@ -555,13 +576,22 @@ def save_image(data_uri, job_id):
 def save_audio(b64_data, original_filename):
     try:
         data = binascii.a2b_base64(b64_data)
-        filename = "response_" + original_filename
-        if not filename.endswith(".mp3") and not filename.endswith(".wav"):
-             filename += ".mp3"
+        # Auto-detect audio format: RIFF header is WAV, otherwise MP3
+        if data.startswith(b"RIFF"):
+            ext = ".wav"
+        else:
+            ext = ".mp3"
+        base = os.path.splitext(os.path.basename(original_filename))[0]
+        if base.startswith("response_"):
+            filename = f"{base}{ext}"
+        else:
+            filename = f"response_{base}{ext}"
         with open(filename, "wb") as f:
             f.write(data)
+        return filename
     except Exception as e:
         log(f"Failed to save audio: {e}", "ERROR")
+        return None
 
 def fetch_fallback_tts(text, filename):
     """
@@ -621,20 +651,15 @@ def send_voice_file(filepath, silent=False):
             
             audio_b64 = data.get('audio_base64')
             if audio_b64:
-                import os
-                base_name = os.path.basename(filepath)
-                save_audio(audio_b64, base_name)
-                play_audio("response_" + base_name)
+                saved_audio_path = save_audio(audio_b64, filepath)
+                if saved_audio_path:
+                    play_audio(saved_audio_path)
             else:
                 text_response = data.get('text_response')
                 if text_response and not silent:
-                    import os
-                    base_name = os.path.basename(filepath)
-                    filename = "response_" + base_name
-                    if not filename.endswith(".mp3") and not filename.endswith(".wav"):
-                        filename += ".mp3"
-                    if fetch_fallback_tts(text_response, filename):
-                        play_audio(filename)
+                    fallback_file = "response_" + os.path.splitext(os.path.basename(filepath))[0] + ".mp3"
+                    if fetch_fallback_tts(text_response, fallback_file):
+                        play_audio(fallback_file)
                 
             res.close()
             return data
