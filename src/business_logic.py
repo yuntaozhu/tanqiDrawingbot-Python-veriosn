@@ -600,13 +600,33 @@ def _apply_drawing_heuristics(
     user_text_lower = user_text.lower() if user_text else ""
     drawing_keywords = [
         "画画", "画一个", "画只", "画张", "画条", "画一幅", "画一画",
-        "想要画", "帮我画", "可以画", "画个", "画出", "画",
+        "想要画", "帮我画", "可以画", "画个", "画出", "画", "帮我画",
+        "想画", "想要一个画", "想要一张画", "画它", "画出来", "画出来吧"
     ]
 
+    agreement_keywords = [
+        "好", "好的", "好呀", "好啊", "想", "想画", "要", "要画", "对", "对呀",
+        "画一个", "画出来", "可以", "行", "嗯", "嗯嗯", "喜欢", "要的", "画吧", "画呀"
+    ]
+
+    # 1. Direct explicit drawing keywords from user
     if user_text_lower and any(kw in user_text_lower for kw in drawing_keywords) and not requires_drawing:
         logger.debug(f"[HEURISTIC] Forcing requires_drawing=True from user text: '{user_text}'")
         requires_drawing = True
 
+    # 2. Check if previous AI message asked to draw and user answered in agreement
+    conv_context = ConversationManager.get_conversation_context(device_token)
+    if conv_context and not requires_drawing:
+        history = conv_context.get("message_history", [])
+        if history:
+            last_ai_msg = history[-1].get("ai_response", "")
+            if any(ask_kw in last_ai_msg for ask_kw in ["画出来", "要不要画", "想不想画", "为你画", "画一张", "画一幅", "画成画"]):
+                trimmed = user_text_lower.strip("。，！？.!? ")
+                if any(agree_kw == trimmed or agree_kw in trimmed for agree_kw in agreement_keywords):
+                    logger.debug(f"[HEURISTIC] User agreed to previous drawing invitation! user: '{user_text}'")
+                    requires_drawing = True
+
+    # 3. Check assistant drawing trigger phrases in current response
     if check_assistant_drawing_trigger(text_response) and not requires_drawing:
         logger.debug("[HEURISTIC] Forcing requires_drawing=True from assistant reply")
         requires_drawing = True
@@ -614,17 +634,82 @@ def _apply_drawing_heuristics(
     if drawing_prompt.strip() and not requires_drawing:
         requires_drawing = True
 
+    # 4. Recover drawing_prompt if empty but drawing was triggered
     if requires_drawing and not drawing_prompt.strip():
-        conv_context = ConversationManager.get_conversation_context(device_token)
         extracted = extract_drawing_subject_advanced(user_text, text_response, conv_context)
         if extracted:
             drawing_prompt = extracted
 
     if requires_drawing and not drawing_prompt.strip():
         interests = psych_metrics.get("key_interests", [])
-        drawing_prompt = f"可爱的{interests[0]}" if interests else "可爱的小兔子"
+        if interests:
+            drawing_prompt = f"可爱的{interests[0]}"
+        elif conv_context and conv_context.get("scene_elements"):
+            elements = conv_context.get("scene_elements")
+            drawing_prompt = f"可爱的{elements[-1]}"
+        else:
+            drawing_prompt = "可爱的小动物"
 
     return requires_drawing, drawing_prompt
+
+
+async def _background_drawing_and_record(
+    fusion_input: str,
+    device_token: str,
+    text_response: str,
+    drawing_prompt: str
+):
+    """Background task to generate Seedream image, convert to 1-bit line art, and put into PrintJob queue."""
+    draw_start = time.time()
+    try:
+        logger.info(f"[ASYNC_DRAW_BG] 🎨 Background drawing started for: '{fusion_input}' (token: {device_token})")
+        action = await _execute_drawing_with_fusion(fusion_input, device_token, text_response)
+        draw_duration = time.time() - draw_start
+        if action:
+            logger.info(f"[ASYNC_DRAW_BG] ✅ Print job {action.get('job_id')} created in {draw_duration:.2f}s!")
+        else:
+            logger.warning(f"[ASYNC_DRAW_BG] ⚠️ Drawing finished with no action returned ({draw_duration:.2f}s)")
+    except Exception as e:
+        logger.error(f"[ASYNC_DRAW_BG] ❌ Drawing generation failed in background: {e}")
+
+
+async def _background_save_psych_vector(
+    device_token: str,
+    child_text: str,
+    ai_response: str,
+    psych_metrics: Dict[str, Any],
+    drawing_prompt: Optional[str] = None
+):
+    """Background execution for multimodal embedding and saving psychological vector record."""
+    try:
+        doubao = DoubaoAPI.get_instance()
+        combined_text = f"儿童原句: {child_text}\nAI回复: {ai_response}"
+        embedding_vector = await asyncio.to_thread(doubao.generate_embedding, combined_text)
+        if not embedding_vector or embedding_vector == [0.0] * 1024:
+            embedding_vector = [0.0] * 1024
+            embedding_available = False
+        else:
+            embedding_available = True
+
+        vector_metadata = {
+            "psych_metrics": psych_metrics,
+            "drawing_prompt": drawing_prompt,
+            "drawing_url": None,
+            "timestamp": time.time(),
+            "embedding_valid": embedding_available,
+            "embedding_available": embedding_available,
+        }
+        await asyncio.to_thread(
+            save_psych_vector,
+            device_token=device_token,
+            child_text=child_text,
+            ai_response=ai_response,
+            embedding=embedding_vector,
+            metadata=vector_metadata,
+        )
+        logger.debug(f"[BACKGROUND_PSYCH] Psych vector saved successfully for {device_token}")
+    except Exception as e:
+        logger.error(f"[BACKGROUND_PSYCH] Error saving psych vector: {e}")
 
 
 async def _execute_drawing_with_fusion(
@@ -661,25 +746,16 @@ async def _execute_drawing_with_fusion(
         image_url=action.get("image_url"),
         bitmap_hex=action.get("bitmap_hex"),
     )
-    history = list(updated_ctx.get("message_history", []))
-    history.append({
-        "timestamp": time.time(),
-        "user_text": user_text,
-        "ai_response": ai_response,
-        "drawing_triggered": True,
-        "drawing_config": fusion_result,
-        "operation_type": operation["type"],
-        "metadata": {
-            "recognition_confidence": operation.get("confidence", 0),
-            "scene_elements_after": updated_ctx.get("scene_elements", []),
-        },
-    })
-    updated_ctx["message_history"] = history
     ConversationManager.create_or_update_conversation_context(device_token, updated_ctx)
     return action
 
 
-async def _resolve_doubao_dialog(prompt_input: Any, llm_cache: LLMCacheManager) -> tuple:
+async def _resolve_doubao_dialog(
+    prompt_input: Any, 
+    llm_cache: LLMCacheManager,
+    history: Optional[List[Dict[str, Any]]] = None,
+    ask_to_draw: bool = False
+) -> tuple:
     """
     Resolve user dialog via Doubao:
     - bytes: fast STT (~0.3s) → Doubao unified_text_chat (~0.8s)
@@ -698,13 +774,9 @@ async def _resolve_doubao_dialog(prompt_input: Any, llm_cache: LLMCacheManager) 
         logger.info(f"[STT] Audio transcribed in {stt_duration:.2f}s. Result: '{user_text}'")
 
         if user_text:
-            cached_res = llm_cache.get(user_text)
-            if cached_res:
-                return cached_res, stt_duration, llm_duration
-
             llm_start = time.time()
             try:
-                res_data = doubao.unified_text_chat(user_text)
+                res_data = doubao.unified_text_chat(user_text, history=history, ask_to_draw=ask_to_draw)
             except Exception as text_err:
                 logger.warning(f"[DOUBAO] unified_text_chat after STT failed: {text_err}")
             llm_duration = time.time() - llm_start
@@ -714,7 +786,7 @@ async def _resolve_doubao_dialog(prompt_input: Any, llm_cache: LLMCacheManager) 
     else:
         llm_start = time.time()
         try:
-            res_data = doubao.unified_text_chat(prompt_input)
+            res_data = doubao.unified_text_chat(prompt_input, history=history, ask_to_draw=ask_to_draw)
         except Exception as text_err:
             logger.warning(f"[DOUBAO] unified_text_chat failed: {text_err}")
         llm_duration = time.time() - llm_start
@@ -726,8 +798,6 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
     start_time = time.time()
     stt_duration = 0.0
     llm_duration = 0.0
-    draw_duration = 0.0
-    embed_duration = 0.0
     tts_duration = 0.0
 
     device_token = device_token or "anonymous_device"
@@ -737,20 +807,21 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
     if not doubao.client:
         raise HTTPException(status_code=500, detail="ARK_API_KEY is not configured")
 
-    if isinstance(prompt_input, str):
-        cached_res = llm_cache.get(prompt_input)
-        if cached_res:
-            logger.info(f"[CACHE] 0ms Cache Hit for LLM Text Input: '{prompt_input}'")
-            return cached_res
+    # Load context and check turn count
+    context = ConversationManager.get_conversation_context(device_token)
+    if context is None:
+        context = _default_conversation_context(device_token)
+
+    message_history = list(context.get("message_history", []))
+    turn_count = len(message_history) + 1
+
+    # Check if we should actively guide and ask the child to draw (every 3 conversation turns)
+    ask_to_draw = (turn_count % 3 == 0)
 
     try:
-        logger.info(f"[CORE] Doubao pipeline for token: {device_token}...")
-        dialog_result = await _resolve_doubao_dialog(prompt_input, llm_cache)
+        logger.info(f"[CORE] Doubao pipeline for token: {device_token} (Turn: {turn_count}, ask_to_draw: {ask_to_draw})...")
+        dialog_result = await _resolve_doubao_dialog(prompt_input, llm_cache, history=message_history, ask_to_draw=ask_to_draw)
         res_data, stt_duration, llm_duration = dialog_result
-
-        # Full cached voice/text response from STT cache hit
-        if res_data and "text_response" in res_data and "assistant_reply" not in res_data:
-            return res_data
 
         if res_data:
             user_text = res_data.get("user_transcript", "")
@@ -769,19 +840,9 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
                 f"Reply: '{text_response}', Drawing: {requires_drawing} ({drawing_prompt})"
             )
 
-            action = None
-            image_url_result = None
-            audio_base64 = None
             voice_config = get_device_settings(device_token)
 
-            draw_task = None
-            draw_start = time.time()
-            if requires_drawing and (user_text or drawing_prompt):
-                fusion_input = user_text or drawing_prompt
-                draw_task = asyncio.create_task(
-                    _execute_drawing_with_fusion(fusion_input, device_token, text_response)
-                )
-
+            # 1. Start TTS Generation (Fast audio synthesis)
             tts_task = None
             tts_start = time.time()
             if text_response:
@@ -789,34 +850,45 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
                     asyncio.to_thread(doubao.generate_speech, text_response, voice_config)
                 )
 
-            if draw_task and tts_task:
-                results = await asyncio.gather(draw_task, tts_task, return_exceptions=True)
-                draw_res, tts_res = results[0], results[1]
-                draw_duration = time.time() - draw_start
-                tts_duration = time.time() - tts_start
-                if isinstance(draw_res, Exception):
-                    logger.error(f"[DOUBAO] Fusion drawing failed: {draw_res}")
-                else:
-                    action = draw_res
-                    if action:
-                        image_url_result = action.get("image_url")
-                        logger.info(f"[DOUBAO] Drawing print job created: {action.get('job_id')}")
-                if isinstance(tts_res, Exception):
-                    logger.error(f"[DOUBAO] Speech gen failed: {tts_res}")
-                else:
-                    audio_base64 = tts_res
-                logger.info(f"[DOUBAO] Parallel draw+tts completed (draw: {draw_duration:.2f}s, tts: {tts_duration:.2f}s)")
-            elif draw_task:
-                try:
-                    action = await draw_task
-                    draw_duration = time.time() - draw_start
-                    if action:
-                        image_url_result = action.get("image_url")
-                        logger.info(f"[DOUBAO] Drawing print job created: {action.get('job_id')}")
-                except Exception as draw_err:
-                    draw_duration = time.time() - draw_start
-                    logger.error(f"[DOUBAO] Fusion drawing failed: {draw_err}")
-            elif tts_task:
+            # 2. If drawing is requested, launch drawing as an independent background task (DO NOT block the HTTP response!)
+            action_preview = None
+            if requires_drawing and (user_text or drawing_prompt):
+                fusion_input = user_text or drawing_prompt
+                asyncio.create_task(
+                    _background_drawing_and_record(fusion_input, device_token, text_response, drawing_prompt)
+                )
+                action_preview = {
+                    "type": "draw",
+                    "status": "generating_in_background",
+                    "prompt": drawing_prompt or fusion_input
+                }
+
+            # 3. Update and persist message history to conversation context
+            new_msg = {
+                "timestamp": time.time(),
+                "user_text": user_text,
+                "ai_response": text_response,
+                "drawing_triggered": requires_drawing,
+                "drawing_prompt": drawing_prompt if requires_drawing else None,
+            }
+            message_history.append(new_msg)
+            context["message_history"] = message_history
+            ConversationManager.create_or_update_conversation_context(device_token, context)
+
+            # 4. Launch psych vector & embedding save as an independent background task
+            asyncio.create_task(
+                _background_save_psych_vector(
+                    device_token=device_token,
+                    child_text=user_text,
+                    ai_response=text_response,
+                    psych_metrics=psych_metrics,
+                    drawing_prompt=drawing_prompt if requires_drawing else None
+                )
+            )
+
+            # 5. Await only TTS audio for instant response (typically ~0.5s)
+            audio_base64 = None
+            if tts_task:
                 try:
                     audio_base64 = await tts_task
                     tts_duration = time.time() - tts_start
@@ -825,58 +897,26 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
                     tts_duration = time.time() - tts_start
                     logger.error(f"[DOUBAO] Speech gen failed: {tts_err}")
 
-            embedding_available = False
-            embed_start = time.time()
-            try:
-                combined_text = f"儿童原句: {user_text}\nAI回复: {text_response}"
-                embedding_vector = doubao.generate_embedding(combined_text)
-                if not embedding_vector or embedding_vector == [0.0] * 1024:
-                    embedding_vector = [0.0] * 1024
-                    embedding_available = False
-                else:
-                    embedding_available = True
-
-                vector_metadata = {
-                    "psych_metrics": psych_metrics,
-                    "drawing_prompt": drawing_prompt if requires_drawing else None,
-                    "drawing_url": image_url_result if image_url_result else None,
-                    "timestamp": time.time(),
-                    "embedding_valid": embedding_available,
-                    "embedding_available": embedding_available,
-                }
-                save_psych_vector(
-                    device_token=device_token,
-                    child_text=user_text,
-                    ai_response=text_response,
-                    embedding=embedding_vector,
-                    metadata=vector_metadata,
-                )
-            except Exception as vector_err:
-                logger.error(f"[DOUBAO_VECTOR] Embedding/Vector DB write failed: {vector_err}")
-                embedding_available = False
-            embed_duration = time.time() - embed_start
-
             total_duration = time.time() - start_time
             logger.info(
-                f"\n=================== PERFORMANCE METRICS SUMMARY ===================\n"
+                f"\n=================== REAL-TIME PERFORMANCE METRICS ===================\n"
                 f"  [ASR / STT]      : {stt_duration:.2f}s\n"
                 f"  [LLM / DIALOG]   : {llm_duration:.2f}s\n"
-                f"  [DRAW / IMAGE]   : {draw_duration:.2f}s\n"
-                f"  [EMBED / VECTOR] : {embed_duration:.2f}s\n"
                 f"  [TTS / AUDIO]    : {tts_duration:.2f}s\n"
-                f"  [TOTAL REQUEST]  : {total_duration:.2f}s\n"
-                f"==================================================================="
+                f"  [DRAWING BG TASK]: {'Active (Background)' if requires_drawing else 'None'}\n"
+                f"  [TOTAL LATENCY]  : {total_duration:.2f}s (Ultra-Fast Response!)\n"
+                f"====================================================================="
             )
 
             return_payload = {
                 "text_response": text_response,
-                "action": action,
+                "action": action_preview,
                 "audio_base64": audio_base64,
                 "stt_empty": False if user_text else True,
-                "embedding_available": embedding_available,
+                "requires_drawing": requires_drawing,
+                "device_token": device_token,
+                "turn_count": turn_count
             }
-            if user_text:
-                llm_cache.set(user_text, return_payload)
             return return_payload
 
     except Exception as pipeline_err:

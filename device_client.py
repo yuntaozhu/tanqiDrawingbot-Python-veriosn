@@ -675,6 +675,23 @@ def send_voice_file(filepath, silent=False):
         log(f"Exception sending voice file: {e}", "ERROR")
         return None
 
+def background_print_job_worker():
+    """Continuously polls for print jobs in the background and prints them seamlessly."""
+    while True:
+        try:
+            job = check_print_jobs()
+            if job:
+                prompt_text = job.get('prompt') or '黑白简笔画'
+                log(f">>> 🤖 打印机收到新出纸任务! 正在输出黑白线稿: '{prompt_text}'")
+                image_url = job.get('image_url')
+                if image_url and image_url.startswith('data:image'):
+                    save_image(image_url, job.get('job_id'))
+                time.sleep(1.0)
+                complete_print_job(job['job_id'])
+        except Exception:
+            pass
+        time.sleep(2.0)
+
 # -----------------------------------------------------------------------------
 # Main Call / Dialogue Service
 # -----------------------------------------------------------------------------
@@ -698,6 +715,12 @@ def start_realtime_call_service():
     if not check_server_health():
         print("无法连接到服务器。请检查网络或服务器地址。退出中...")
         return
+
+    # Start background print job listener thread
+    import threading
+    t = threading.Thread(target=background_print_job_worker, daemon=True)
+    t.start()
+    log("已启动后台打印机监听线程 (自动拉取并打印生成的简笔画)", "DEBUG")
     
     # Select dialogue mode
     dialog_mode = "1" # Default to Auto-VAD

@@ -743,36 +743,59 @@ class DoubaoAPI:
         return DeepSeekAPI.get_instance().transcribe_audio(audio_bytes)
 
     @retry_with_backoff(max_retries=2)
-    def unified_text_chat(self, text_prompt: str) -> Optional[Dict[str, Any]]:
+    def unified_text_chat(
+        self, 
+        text_prompt: str, 
+        history: Optional[List[Dict[str, Any]]] = None,
+        ask_to_draw: bool = False
+    ) -> Optional[Dict[str, Any]]:
         if not self.client:
             raise ValueError("ARK_API_KEY is not set.")
             
         system_instruction = """你是一位极其温柔、懂得儿童心理学的幼儿园特级教师，名字叫'小探宝'。
-你的任务是与小朋友进行顺畅好玩的互动聊天。在输出中严格返回一个 JSON 对象，结构如下：
+你的任务是与小朋友进行顺畅、自然、充满童趣的连续多轮互动聊天。
+请在输出中严格返回一个合法的 JSON 对象（绝对不要包含 ```json 等任何 Markdown 标记或多余解释文本），结构如下：
 {
   "user_transcript": "（在这里原样填写小朋友的对话输入）",
-  "assistant_reply": "（在这里填写你作为温柔的探奇老师对小朋友的回答，保持简短、充满童趣，控制在 3-5 句话内）",
-  "requires_drawing": true/false（布尔值，判断小朋友是否有画画的需求，比如提到“画一个...”、“想要一个画”等）,
-  "drawing_prompt": "（如果requires_drawing为true，在此处提取出小朋友想要画画的具体主题，如'小猫'、'红色的赛车'，否则填空字符串）",
+  "assistant_reply": "（在这里填写你作为温柔的探奇老师对小朋友的回答，保持简短、充满童趣，控制在 2-4 句话内）",
+  "requires_drawing": true/false（布尔值。判断是否需要画画。若小朋友明确表达画画需求，或对你询问'要不要画出来'表示肯定赞同如回答'好/想画/画一个/想要/画出来/画吧/对呀/嗯嗯'等，必须填 true，否则填 false）,
+  "drawing_prompt": "（如果 requires_drawing 为 true，提取出小朋友想要画画的具体主题与画面场景，结合上下文补充细节如'草地上奔跑的可爱金毛小狗'；若为 false 填空字符串）",
   "psych_metrics": {
-    "detected_emotions": ["（识别出小朋友说话时的主要情绪，如：快乐、同理心、悲伤、焦虑、好奇、愤怒等，可以填1-2个）"],
-    "linguistic_richness_score": （小数值，范围0.0~1.0，根据小朋友话语的句子完整度和词汇丰富度进行打分）,
-    "cognitive_milestone_ref": "（根据小朋友表达的特征，标注其当前的心理与认知发展特征，如：感知运算阶段、前运算符号思维、同理心萌芽等）",
-    "attention_span_seconds": 15（估算的小朋友专注时长，默认15即可）,
-    "key_interests": ["（提取小朋友话语中的核心关切或兴趣，如：小动物、天气、玩具、大自然等，可填1-2个）"],
-    "requires_attention": false（布尔值，若识别到极度消极、焦虑、恐惧、分离焦虑或明显异常心理，则填true，否则为false）
+    "detected_emotions": ["（识别出小朋友说话时的主要情绪，如：快乐、好奇、兴奋、同理心等，填1-2个）"],
+    "linguistic_richness_score": 0.8（小数值，范围0.0~1.0，根据小朋友话语的句子完整度和词汇丰富度进行打分）,
+    "cognitive_milestone_ref": "前运算符号思维（标注当前认知特征）",
+    "attention_span_seconds": 15,
+    "key_interests": ["（提取小朋友话语中的核心关切或兴趣事物，如：小狗、恐龙、积木等，填1-2个）"],
+    "requires_attention": false
   }
 }
-请确保你的回复必须是合法的 JSON 对象。绝对不能包含 markdown 格式标记（如 ```json 等），也不能有任何 JSON 以外的解释文本。"""
+【重要引导与对话规则】
+1. 连续陪伴：结合之前的对话记录，像知心朋友一样亲切自然地与小朋友互动。
+2. 敏锐捕捉绘画意图：当小朋友直接说想画什么，或者对你询问是否要画画表示肯定（例如你问'想不想画出来'，孩子说'好呀/要/画一个/想'），必须将 requires_drawing 设为 true，并给出温暖期待的肯定回应（如'太棒啦！探奇老师马上就为你画[主题]，画完后会自动打印出来哦！你接着跟探奇老师聊聊...'）。
+3. 主动引导画画：如果收到系统提示 ask_to_draw，请在你的回复末尾，极其自然且充满童趣地主动询问小朋友：'宝贝，你想不想让探奇老师把我们刚才聊的[具体事物]画出来呀？'"""
 
         try:
-            print(f"[DEBUG] [DOUBAO_TEXT] Sending chat to {self.audio_model}...")
+            print(f"[DEBUG] [DOUBAO_TEXT] Sending chat to {self.audio_model} (ask_to_draw={ask_to_draw})...")
+            
+            messages = [{"role": "system", "content": system_instruction}]
+            if history:
+                for item in history[-6:]:
+                    u_text = item.get("user_text", "")
+                    a_resp = item.get("ai_response", "")
+                    if u_text:
+                        messages.append({"role": "user", "content": u_text})
+                    if a_resp:
+                        messages.append({"role": "assistant", "content": a_resp})
+
+            user_content = text_prompt
+            if ask_to_draw:
+                user_content += "\n（系统提示：现在是阶段引导时机，请在你的回复最后主动且自然地询问小朋友，想不想把你俩刚才聊到的事物画出来）"
+
+            messages.append({"role": "user", "content": user_content})
+
             response = self.client.chat.completions.create(
                 model=self.audio_model,
-                messages=[
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": text_prompt}
-                ],
+                messages=messages,
                 timeout=15
             )
             content = response.choices[0].message.content
