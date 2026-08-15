@@ -173,39 +173,52 @@ def parse_bool(val) -> bool:
 
 
 def check_assistant_drawing_trigger(text: str) -> bool:
+    """Only true for clear AI promises that drawing has started (not invitations)."""
     if not text:
         return False
     text_lower = text.lower()
-    
-    # 1. Direct explicit drawing initiation phrases
+    # Invitation questions must NOT trigger drawing.
+    if any(q in text_lower for q in [
+        "你想画", "你要画", "画什么", "要不要画", "想不想画", "画出来呀", "画出来吗", "画出来不"
+    ]):
+        return False
     direct_triggers = [
-        "我们一起来画", "我为你画", "我画了", "为你画了", "开始画", 
-        "画一个", "画个", "画一只", "画一幅", "画画", "画张", "画条",
-        "这就画", "这就给你画", "画给你", "正在画", "准备画", "开始为你画",
-        "画好啦", "画好哈", "画好喽", "画了编", "画好了", "画出来", "把...画", "给你画", "帮宝贝画"
+        "我们一起来画", "我为你画", "我画了", "为你画了", "开始画",
+        "这就画", "这就给你画", "正在画", "准备画", "开始为你画",
+        "画好啦", "画好了", "马上画", "马上为你画", "马上帮你画", "帮宝贝画"
     ]
-    if any(trig in text_lower for trig in direct_triggers):
+    return any(trig in text_lower for trig in direct_triggers)
+
+
+def _is_preview_lookback_request(user_text: str) -> bool:
+    """Child is asking where the previous drawing is — not a new draw command."""
+    if not user_text:
+        return False
+    lookback = [
+        "没看到", "看不到", "看不见", "哪里的画", "画呢", "画在哪",
+        "刚才的画", "刚刚的画", "画好了吗", "画好了没", "图片呢", "画出来了吗"
+    ]
+    return any(k in user_text for k in lookback)
+
+
+def _is_short_affirmation(user_text: str) -> bool:
+    """True only for short yes-answers, not greetings like 你好."""
+    if not user_text:
+        return False
+    trimmed = user_text.strip("。，！？.!? ～~、 ")
+    exact = {
+        "好", "好的", "好呀", "好啊", "好哦", "好嘞", "行", "行啊", "行呀",
+        "要", "要的", "要呀", "要啊", "想", "想画", "想要", "可以", "可以呀",
+        "嗯", "嗯嗯", "对", "对呀", "对啊", "是", "是的", "画吧", "画呀",
+        "画出来", "画一个", "画", "来吧", "喜欢"
+    }
+    if trimmed in exact:
         return True
-        
-    # 2. Semantic action cues when "画" is mentioned
-    if "画" in text_lower:
-        # If it's a question asking the child what/how to draw, don't trigger.
-        is_question = any(q in text_lower for q in [
-            "你想画", "你要画", "你想画个", "画什么", "画哪个", "画几", 
-            "要不要画", "想不想画", "会画什么", "喜欢画"
-        ])
-        if not is_question:
-            # Declarations/promises to draw
-            declarations = [
-                "变成", "变出", "变一幅", "变一个", "变一只",
-                "我这就", "老师这就", "我来给", "我为你", "帮宝贝", "帮你想", 
-                "这就画", "我画了", "开始画", "准备画", "正在画", "画好啦", "画好了", 
-                "马上把", "马上画", "马上为", "马上给", "马上", "现在就", "等下就能看到", 
-                "等一下就能看到", "把这个", "魔法", "呈现"
-            ]
-            if any(dec in text_lower for dec in declarations):
-                return True
-                
+    # Allow "好的呀" / "要画" style short replies (≤6 chars)
+    if len(trimmed) <= 6 and any(
+        trimmed.startswith(p) for p in ("好", "要", "想", "行", "对", "嗯", "画", "可以")
+    ):
+        return True
     return False
 
 
@@ -460,10 +473,10 @@ async def async_generate_drawing_with_fusion(
     try:
         processed_image, bitmap_hex = await asyncio.wait_for(
             asyncio.to_thread(_generate_sync),
-            timeout=60.0
+            timeout=50.0
         )
     except asyncio.TimeoutError:
-        print(f"[ERROR] [ASYNC_DRAW] Image generation with fusion timed out after 45s")
+        print(f"[ERROR] [ASYNC_DRAW] Image generation with fusion timed out after 50s")
         processed_image, bitmap_hex = None, None
 
     if processed_image and isinstance(processed_image, str) and len(processed_image.strip()) > 0:
@@ -609,60 +622,77 @@ def _apply_drawing_heuristics(
     psych_metrics: Dict[str, Any],
     device_token: str,
 ) -> tuple:
-    user_text_lower = user_text.lower() if user_text else ""
-    drawing_keywords = [
-        "画画", "画一个", "画只", "画张", "画条", "画一幅", "画一画",
-        "想要画", "帮我画", "可以画", "画个", "画出", "画", "帮我画",
-        "想画", "想要一个画", "想要一张画", "画它", "画出来", "画出来吧"
-    ]
+    user_text = user_text or ""
+    drawing_prompt = (drawing_prompt or "").strip()
 
-    agreement_keywords = [
-        "好", "好的", "好呀", "好啊", "想", "想画", "要", "要画", "对", "对呀",
-        "画一个", "画出来", "可以", "行", "嗯", "嗯嗯", "喜欢", "要的", "画吧", "画呀"
-    ]
+    # Never treat "where's my drawing" as a new draw request
+    if _is_preview_lookback_request(user_text):
+        logger.info(f"[HEURISTIC] Preview lookback — skip drawing. user='{user_text}'")
+        return False, ""
 
-    # 1. Direct explicit drawing keywords from user
-    if user_text_lower and any(kw in user_text_lower for kw in drawing_keywords) and not requires_drawing:
-        logger.debug(f"[HEURISTIC] Forcing requires_drawing=True from user text: '{user_text}'")
+    # Explicit draw phrases only (no bare "画" alone matching greetings)
+    explicit_draw_keywords = [
+        "画画", "画一个", "画一只", "画只", "画张", "画条", "画一幅", "画一画",
+        "想要画", "帮我画", "可以画", "画个", "画出", "想画",
+        "画出来", "画出来吧", "再画", "画小猫", "画小狗", "画小兔", "画只小"
+    ]
+    if not requires_drawing and any(kw in user_text for kw in explicit_draw_keywords):
+        logger.debug(f"[HEURISTIC] Explicit draw intent from user: '{user_text}'")
         requires_drawing = True
 
-    # 2. Check if previous AI message asked to draw and user answered in agreement
     conv_context = ConversationManager.get_conversation_context(device_token)
-    if conv_context and not requires_drawing:
+
+    # Agreeing to a previous AI invitation — only short affirmations
+    if not requires_drawing and conv_context:
         history = conv_context.get("message_history", [])
         if history:
-            last_ai_msg = history[-1].get("ai_response", "")
-            if any(ask_kw in last_ai_msg for ask_kw in ["画出来", "要不要画", "想不想画", "为你画", "画一张", "画一幅", "画成画"]):
-                trimmed = user_text_lower.strip("。，！？.!? ")
-                if any(agree_kw == trimmed or agree_kw in trimmed for agree_kw in agreement_keywords):
-                    logger.debug(f"[HEURISTIC] User agreed to previous drawing invitation! user: '{user_text}'")
-                    requires_drawing = True
+            last_ai_msg = history[-1].get("ai_response", "") or ""
+            invited = any(ask_kw in last_ai_msg for ask_kw in [
+                "画出来", "要不要画", "想不想画", "画一张", "画一幅", "帮你画"
+            ])
+            if invited and _is_short_affirmation(user_text):
+                logger.debug(f"[HEURISTIC] Short affirmation after invite: '{user_text}'")
+                requires_drawing = True
 
-    # 3. Check assistant drawing trigger phrases in current response
-    if check_assistant_drawing_trigger(text_response) and not requires_drawing:
-        logger.debug("[HEURISTIC] Forcing requires_drawing=True from assistant reply")
-        requires_drawing = True
+    # Do NOT force drawing just because assistant mentioned 画/马上 — that caused false positives.
+    # Do NOT force drawing just because drawing_prompt is non-empty unless LLM already set requires_drawing.
 
-    if drawing_prompt.strip() and not requires_drawing:
-        requires_drawing = True
+    if not requires_drawing:
+        return False, ""
 
-    # 4. Recover drawing_prompt if empty but drawing was triggered
-    if requires_drawing and not drawing_prompt.strip():
+    # Recover a concrete subject when prompt is empty / vague
+    vague = {"", "画", "画画", "画出来", "好的", "好的画出来", "画出来吧"}
+    if not drawing_prompt or drawing_prompt.replace("，", "").replace("。", "").replace(" ", "") in vague:
         extracted = extract_drawing_subject_advanced(user_text, text_response, conv_context)
-        if extracted:
+        if extracted and extracted not in vague:
             drawing_prompt = extracted
+        elif conv_context:
+            # Prefer last successful drawing subject from history
+            for msg in reversed(conv_context.get("message_history", []) or []):
+                prev = (msg or {}).get("drawing_prompt")
+                if prev and str(prev).strip() and str(prev).strip() not in vague:
+                    drawing_prompt = str(prev).strip()
+                    break
+            if not drawing_prompt and conv_context.get("scene_elements"):
+                drawing_prompt = f"可爱的{conv_context['scene_elements'][-1]}"
+            elif not drawing_prompt and conv_context.get("last_generated_prompt"):
+                drawing_prompt = conv_context["last_generated_prompt"]
 
     if requires_drawing and not drawing_prompt.strip():
-        interests = psych_metrics.get("key_interests", [])
-        if interests:
-            drawing_prompt = f"可爱的{interests[0]}"
-        elif conv_context and conv_context.get("scene_elements"):
-            elements = conv_context.get("scene_elements")
-            drawing_prompt = f"可爱的{elements[-1]}"
-        else:
-            drawing_prompt = "可爱的小动物"
+        interests = (psych_metrics or {}).get("key_interests", [])
+        drawing_prompt = f"可爱的{interests[0]}" if interests else "可爱的小动物"
+
+    # Never use greeting / lookback text as the image prompt
+    bad_subjects = ["你好", "开始聊天", "没看到", "看不到"]
+    if any(b in drawing_prompt for b in bad_subjects) and len(drawing_prompt) < 20:
+        drawing_prompt = "可爱的小动物"
 
     return requires_drawing, drawing_prompt
+
+
+# One Seedream job at a time (single Railway worker — concurrent draws starve voice LLM)
+_DRAWING_SEMAPHORE = asyncio.Semaphore(1)
+_active_drawing_devices: set = set()
 
 
 async def _background_drawing_and_record(
@@ -672,17 +702,31 @@ async def _background_drawing_and_record(
     drawing_prompt: str
 ):
     """Background task: generate Seedream line art and save as status=ready (screen preview). Does NOT auto-print."""
+    # Prefer LLM drawing_prompt — never send greetings / "好的画出来" as the image subject
+    subject = (drawing_prompt or "").strip() or (fusion_input or "").strip()
+    if not subject:
+        logger.warning("[ASYNC_DRAW_BG] Empty subject, skip drawing")
+        return
+
+    if device_token in _active_drawing_devices:
+        logger.info(f"[ASYNC_DRAW_BG] Skip — device {device_token} already has an active drawing job")
+        return
+
     draw_start = time.time()
+    _active_drawing_devices.add(device_token)
     try:
-        logger.info(f"[ASYNC_DRAW_BG] 🎨 Background drawing started for: '{fusion_input}' (token: {device_token})")
-        action = await _execute_drawing_with_fusion(fusion_input, device_token, text_response)
-        draw_duration = time.time() - draw_start
-        if action:
-            logger.info(f"[ASYNC_DRAW_BG] ✅ Drawing {action.get('job_id')} ready for screen preview in {draw_duration:.2f}s (await user Print button)")
-        else:
-            logger.warning(f"[ASYNC_DRAW_BG] ⚠️ Drawing finished with no action returned ({draw_duration:.2f}s)")
+        async with _DRAWING_SEMAPHORE:
+            logger.info(f"[ASYNC_DRAW_BG] 🎨 Background drawing started for: '{subject}' (token: {device_token})")
+            action = await _execute_drawing_with_fusion(subject, device_token, text_response)
+            draw_duration = time.time() - draw_start
+            if action:
+                logger.info(f"[ASYNC_DRAW_BG] ✅ Drawing {action.get('job_id')} ready for screen preview in {draw_duration:.2f}s (await user Print button)")
+            else:
+                logger.warning(f"[ASYNC_DRAW_BG] ⚠️ Drawing finished with no action returned ({draw_duration:.2f}s)")
     except Exception as e:
         logger.error(f"[ASYNC_DRAW_BG] ❌ Drawing generation failed in background: {e}")
+    finally:
+        _active_drawing_devices.discard(device_token)
 
 
 async def _background_save_psych_vector(
@@ -864,8 +908,9 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
 
             # 2. If drawing is requested, launch drawing as an independent background task (DO NOT block the HTTP response!)
             action_preview = None
-            if requires_drawing and (user_text or drawing_prompt):
-                fusion_input = user_text or drawing_prompt
+            if requires_drawing and (drawing_prompt or user_text):
+                # Prefer drawing_prompt so Seedream never gets greetings / "好的画出来"
+                fusion_input = drawing_prompt or user_text
                 asyncio.create_task(
                     _background_drawing_and_record(fusion_input, device_token, text_response, drawing_prompt)
                 )

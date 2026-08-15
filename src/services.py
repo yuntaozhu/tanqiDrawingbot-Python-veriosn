@@ -229,36 +229,28 @@ class DeepSeekAPI:
         
         # 1. Primary STT from Env
         if STT_API_KEY:
-            sf_model = STT_MODEL or ("FunAudioLLM/SenseVoiceSmall" if "siliconflow" in STT_BASE_URL.lower() else "whisper-1")
+            sf_model = STT_MODEL or ("FunAudioLLM/SenseVoiceSmall" if (STT_BASE_URL and "siliconflow" in STT_BASE_URL.lower()) else "whisper-1")
             providers.append({"name": "Primary (Env)", "key": STT_API_KEY, "url": STT_BASE_URL, "model": sf_model})
             
-        # 2. SiliconFlow Fallback with faster-whisper
-        sf_key = SILICONFLOW_API_KEY or (STT_API_KEY if "siliconflow" in STT_BASE_URL.lower() else None)
-        if sf_key:
+        # 2. SiliconFlow SenseVoice fallback (avoid broken SYSTRAN/faster-whisper-large-v3)
+        sf_key = SILICONFLOW_API_KEY or (STT_API_KEY if STT_BASE_URL and "siliconflow" in STT_BASE_URL.lower() else None)
+        primary_is_sf = STT_BASE_URL and "siliconflow" in STT_BASE_URL.lower()
+        if sf_key and not primary_is_sf:
             providers.append({
-                "name": "SiliconFlow-Whisper", 
-                "key": sf_key, 
+                "name": "SiliconFlow-SenseVoice",
+                "key": sf_key,
                 "url": "https://api.siliconflow.cn/v1",
-                "model": "SYSTRAN/faster-whisper-large-v3"
+                "model": SILICONFLOW_STT_MODEL or "FunAudioLLM/SenseVoiceSmall"
             })
-            
+
         # 3. OpenAI Fallback
         if OPENAI_API_KEY:
             providers.append({
-                "name": "OpenAI", 
-                "key": OPENAI_API_KEY, 
+                "name": "OpenAI",
+                "key": OPENAI_API_KEY,
                 "url": "https://api.openai.com/v1",
                 "model": "whisper-1"
             })
-
-        # 4. DeepSeek Key (only if URL is likely a relay or custom)
-        if self.api_key and "deepseek.com" not in self.base_url.lower():
-             providers.append({
-                 "name": "DeepSeek Relay", 
-                 "key": self.api_key, 
-                 "url": self.base_url,
-                 "model": os.getenv("DEEPSEEK_STT_MODEL", "whisper-1")
-             })
 
         if not providers:
             print("[ERROR] [STT] No valid STT providers configured in environment variables.")
@@ -272,10 +264,6 @@ class DeepSeekAPI:
                 
                 start_time = time.time()
                 model_name = provider.get("model", "whisper-1")
-                
-                # SiliconFlow default STT model correction
-                if provider["name"] == "SiliconFlow" and model_name == "Pro/OpenGVLab/InternVL2-8B":
-                     model_name = "SYSTRAN/faster-whisper-large-v3" # Popular on SiliconFlow
                 
                 print(f"[DEBUG] [STT] Attempting with {provider['name']} using model {model_name}...")
                 client = OpenAI(api_key=provider["key"], base_url=provider.get("url"))
@@ -405,25 +393,17 @@ class DeepSeekAPI:
                 print(f"[WARNING] [TTS] Doubao TTS V3 failed: {e}. Falling back to legacy providers...")
 
         providers = []
-        
-        # 2. Doubao Voice Design (legacy OpenAI-compatible, falls back if 404)
-        if ARK_API_KEY and not DeepSeekAPI._doubao_tts_failed:
-             providers.append({
-                 "name": "Doubao-VoiceDesign",
-                 "key": ARK_API_KEY,
-                 "url": "https://ark.cn-beijing.volces.com/api/v3",
-                 "model": ARK_TTS_MODEL
-             })
+        # Skip Doubao-VoiceDesign — returns HTTP 404 on this account and wastes ~2s per cold start.
 
-        # 3. Primary TTS from Env
+        # 2. Primary TTS from Env (usually SiliconFlow CosyVoice)
         if TTS_API_KEY:
              providers.append({"name": "Primary (Env)", "key": TTS_API_KEY, "url": TTS_BASE_URL})
-              
-        # 4. SiliconFlow Fallback
-        if SILICONFLOW_API_KEY:
+
+        # 3. SiliconFlow Fallback
+        if SILICONFLOW_API_KEY and not (TTS_BASE_URL and "siliconflow" in TTS_BASE_URL.lower()):
              providers.append({"name": "SiliconFlow", "key": SILICONFLOW_API_KEY, "url": "https://api.siliconflow.cn/v1"})
-            
-        # 5. OpenAI Fallback
+
+        # 4. OpenAI Fallback
         if OPENAI_API_KEY:
             providers.append({"name": "OpenAI", "key": OPENAI_API_KEY, "url": "https://api.openai.com/v1"})
 
@@ -444,13 +424,7 @@ class DeepSeekAPI:
                 model_name = "tts-1"
                 current_voice = voice_name
                 
-                if provider["name"] == "Doubao-VoiceDesign":
-                    model_name = provider.get("model", "Doubao-Seed-VoiceDesign-1.0")
-                    if not current_voice or current_voice in ["default", "child_friendly"]:
-                        current_voice = "一个极其温柔、友好、可爱的5岁小朋友，用稚嫩温和的语气说话"
-                    elif current_voice == "teacher_female":
-                        current_voice = "一位温柔、知性、亲切的幼儿园女老师"
-                elif "siliconflow.cn" in provider.get("url", "").lower():
+                if "siliconflow.cn" in provider.get("url", "").lower():
                     model_name = "FunAudioLLM/CosyVoice2-0.5B"
                     valid_sf_voices = ["anna", "alex", "benjamin", "clara"]
                     if current_voice in valid_sf_voices:
@@ -461,14 +435,12 @@ class DeepSeekAPI:
                         current_voice = "FunAudioLLM/CosyVoice2-0.5B:clara"
                     else:
                         current_voice = "FunAudioLLM/CosyVoice2-0.5B:anna"
-
                 else:
                     if not current_voice or current_voice in ["default", "child_friendly"] or len(current_voice) > 20:
                         current_voice = "nova"
                     elif current_voice == "teacher_female":
                         current_voice = "alloy"
 
-                    
                 response = client.audio.speech.create(
                     model=model_name,
                     voice=current_voice,
@@ -478,21 +450,17 @@ class DeepSeekAPI:
                 duration = time.time() - start_time
                 base64_data = base64.b64encode(response.content).decode('utf-8')
                 print(f"[DEBUG] [TTS] Success ({provider['name']}) in {duration:.2f}s, size: {len(base64_data)} chars")
-                
-                # Update cache
+
                 TTS_CACHE[text_hash] = {
                     "audio_base64": base64_data,
                     "timestamp": time.time(),
                     "provider": provider["name"]
                 }
                 save_cache(TTS_CACHE_FILE, TTS_CACHE)
-                
+
                 return base64_data
             except Exception as e:
                 print(f"[ERROR] [TTS] Provider {provider['name']} failed: {e}")
-                if provider["name"] == "Doubao-VoiceDesign":
-                    print("[WARNING] [TTS] Marking Doubao-VoiceDesign as failed. Circuit breaker active. Future requests will skip it.")
-                    DeepSeekAPI._doubao_tts_failed = True
                 continue
         
         print("[ERROR] [TTS] All TTS providers failed.")
@@ -554,7 +522,7 @@ class DoubaoAPI:
         return random.choice(scenarios)
 
     def _expand_imaginative_prompt(self, child_prompt: str) -> str:
-        """Expands a simple prompt into an extremely imaginative child-like scenario using the LLM with fast fallback."""
+        """Expand prompt locally only — never call LLM here (competes with voice dialog on 1 worker)."""
         if not child_prompt:
             return ""
 
@@ -565,42 +533,15 @@ class DoubaoAPI:
             print(f"[DEBUG] [PROMPT_EXPAND] Cache Hit! '{child_prompt}' -> '{cached_expanded}'")
             return cached_expanded
 
-        if not self.client or not self.audio_model:
-            return self._local_imaginative_expand(child_prompt)
-        
-        system_instruction = (
-            "你是一个儿童艺术与创意想象力专家。请将用户输入的简单主体（例如'猫'、'小汽车'、'火箭'）"
-            "拓展为一个天马行空、充满星空童真、极具儿童绘画构思与奇妙想象力的绘图场景描述。\n"
-            "【规则】\n"
-            "1. 构思必须非常新颖、奇妙、富有童心与幻想色彩（例如：‘长着翅膀在云朵彩虹桥上飞翔的胡萝卜小汽车’，‘在星空里钓发光星星的宇航员小熊’，‘在海底开着潜水艇弹钢琴的章鱼’）。\n"
-            "2. 只需要提供一两句话的画面场景核心要素，用词要童趣、可爱。\n"
-            "3. 只输出这个画面构思本身，字数在 50 字以内，绝对不要包含任何前缀、解释、Markdown 格式、引号、多余描述或标序。\n"
-            "4. 场景最终必须非常适合被画成黑白简笔画或绘本线稿。"
-        )
-        try:
-            print(f"[DEBUG] [PROMPT_EXPAND] Requesting LLM expansion with 20.0s timeout for: '{child_prompt}'")
-            response = self.client.chat.completions.create(
-                model=self.audio_model,
-                messages=[
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": f"请把这个绘图主题扩展为一个充满童心想象力的画面：{child_prompt}"}
-                ],
-                max_tokens=60,
-                temperature=0.85,
-                timeout=20.0  # Increased to 20.0s to allow Doubao to finish properly
-            )
-            expanded = response.choices[0].message.content.strip()
-            # Clean up potential leading/trailing quotes or helper text
-            expanded = expanded.replace('"', '').replace('“', '').replace('”', '').replace('\'', '')
-            if expanded.startswith("这是一个"):
-                expanded = expanded[4:]
-            print(f"[DEBUG] [PROMPT_EXPAND] Success! Expanded to: '{expanded}'")
-            cache_mgr.set(child_prompt, expanded)
-            return expanded
-        except Exception as e:
-            local_exp = self._local_imaginative_expand(child_prompt)
-            print(f"[WARNING] [PROMPT_EXPAND] LLM expansion failed ({e}). Falling back to local imaginative expansion: '{local_exp}'")
-            return local_exp
+        # Already a detailed scene from dialog LLM — use as-is
+        if len(child_prompt) >= 12 and not child_prompt.strip() in ("画出来", "好的，画出来。", "好的画出来"):
+            print(f"[DEBUG] [PROMPT_EXPAND] Using dialog drawing_prompt as-is: '{child_prompt[:80]}'")
+            return child_prompt
+
+        local_exp = self._local_imaginative_expand(child_prompt)
+        print(f"[DEBUG] [PROMPT_EXPAND] Local expand (no LLM): '{child_prompt}' -> '{local_exp}'")
+        cache_mgr.set(child_prompt, local_exp)
+        return local_exp
 
     @retry_with_backoff(max_retries=2)
     def generate_image(self, prompt: str, aspect_ratio: str = "1:1", num_images: int = 1) -> Optional[List[str]]:
@@ -651,9 +592,31 @@ class DoubaoAPI:
             cache_mgr.set(text, embedding)
         return embedding
 
-    @retry_with_backoff(max_retries=2)
+    def _extract_embedding_vector(self, resp_json: Dict[str, Any]) -> Optional[List[float]]:
+        """Parse Doubao multimodal / text embedding responses (list or dict data shapes)."""
+        data = resp_json.get("data")
+        embedding = None
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                embedding = first.get("embedding")
+            elif isinstance(first, list):
+                embedding = first
+        elif isinstance(data, dict):
+            embedding = data.get("embedding")
+        elif isinstance(resp_json.get("embedding"), list):
+            embedding = resp_json["embedding"]
+
+        # Multimodal API may nest: embedding: [[...]]
+        if isinstance(embedding, list) and embedding and isinstance(embedding[0], list):
+            embedding = embedding[0]
+        if isinstance(embedding, list) and embedding and isinstance(embedding[0], (int, float)):
+            return [float(x) for x in embedding]
+        return None
+
+    @retry_with_backoff(max_retries=1)
     def _generate_embedding_raw(self, text: str, image_url: Optional[str] = None) -> Optional[List[float]]:
-        # 1. Primary: Doubao Multimodal Vision Embedding (doubao-embedding-vision-251215)
+        # 1. Primary: Doubao Multimodal Vision Embedding
         if self.api_key:
             try:
                 url = f"{self.base_url}/embeddings/multimodal"
@@ -661,18 +624,11 @@ class DoubaoAPI:
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {self.api_key}"
                 }
-                input_items = [
-                    {
-                        "type": "text",
-                        "text": text
-                    }
-                ]
+                input_items = [{"type": "text", "text": text}]
                 if image_url and image_url.startswith("http"):
                     input_items.append({
                         "type": "image_url",
-                        "image_url": {
-                            "url": image_url
-                        }
+                        "image_url": {"url": image_url}
                     })
                 payload = {
                     "model": EMBEDDING_MODEL_VISION or "doubao-embedding-vision-251215",
@@ -682,14 +638,30 @@ class DoubaoAPI:
                 resp = requests.post(url, json=payload, headers=headers, timeout=10)
                 if resp.status_code == 200:
                     resp_json = resp.json()
-                    embedding = resp_json["data"][0]["embedding"]
-                    print(f"[DEBUG] [DOUBAO_EMBED] Multimodal embedding success! Vector dim: {len(embedding)}")
-                    self._consecutive_embedding_failures = 0
-                    return embedding
+                    embedding = self._extract_embedding_vector(resp_json)
+                    if embedding:
+                        print(f"[DEBUG] [DOUBAO_EMBED] Multimodal embedding success! Vector dim: {len(embedding)}")
+                        self._consecutive_embedding_failures = 0
+                        return embedding
+                    keys = list(resp_json.keys()) if isinstance(resp_json, dict) else type(resp_json)
+                    print(f"[WARNING] [DOUBAO_EMBED] Unexpected response shape keys={keys}. Falling back...")
                 else:
-                    print(f"[ERROR] [DOUBAO_EMBED] Multimodal embedding HTTP {resp.status_code}: {resp.text}")
+                    print(f"[ERROR] [DOUBAO_EMBED] Multimodal embedding HTTP {resp.status_code}: {resp.text[:300]}")
             except Exception as e:
                 print(f"[WARNING] [DOUBAO_EMBED] Multimodal embedding failed: {e}. Falling back...")
+
+        # 1b. Doubao text embedding endpoint (when multimodal shape/endpoint fails)
+        if self.api_key and self.client:
+            try:
+                text_model = EMBEDDING_MODEL_TEXT or "doubao-embedding-large-text-250515"
+                print(f"[DEBUG] [DOUBAO_EMBED] Trying text embedding model {text_model}...")
+                response = self.client.embeddings.create(model=text_model, input=[text], timeout=10)
+                emb = response.data[0].embedding
+                print(f"[DEBUG] [DOUBAO_EMBED] Text embedding success! Vector dim: {len(emb)}")
+                self._consecutive_embedding_failures = 0
+                return emb
+            except Exception as te:
+                print(f"[WARNING] [DOUBAO_EMBED] Text embedding failed: {te}")
 
         # 2. Fallback: SiliconFlow BAAI/bge-m3
         if SILICONFLOW_API_KEY:
@@ -723,12 +695,11 @@ class DoubaoAPI:
             except Exception as oa_err:
                 print(f"[WARNING] [EMBED] OpenAI embedding failed: {oa_err}")
 
-        # 4. Fallback to zero vector to prevent blocking/crash
         self._consecutive_embedding_failures = getattr(self, "_consecutive_embedding_failures", 0) + 1
         print(f"[CRITICAL_ALERT] [EMBED_DEGRADED] Embedding failure detected! (Consecutive failures: {self._consecutive_embedding_failures})")
         if self._consecutive_embedding_failures >= 5:
             print("[OPERATIONS_ALERT] [MONITORING] Embedding degradation has persisted for more than 5 consecutive requests. Please check API credentials and endpoint availability immediately!")
-        
+
         return [0.0] * 1024
 
     def unified_audio_chat(self, audio_bytes: bytes) -> Optional[Dict[str, Any]]:
@@ -742,79 +713,78 @@ class DoubaoAPI:
         """Transcribe audio using high-speed STT providers (SiliconFlow SenseVoiceSmall / faster-whisper)."""
         return DeepSeekAPI.get_instance().transcribe_audio(audio_bytes)
 
-    @retry_with_backoff(max_retries=2)
     def unified_text_chat(
-        self, 
-        text_prompt: str, 
+        self,
+        text_prompt: str,
         history: Optional[List[Dict[str, Any]]] = None,
         ask_to_draw: bool = False
     ) -> Optional[Dict[str, Any]]:
+        """Realtime dialog — no retry (timeouts must fail fast for voice UX)."""
         if not self.client:
             raise ValueError("ARK_API_KEY is not set.")
-            
-        system_instruction = """你是一位极其温柔、懂得儿童心理学的幼儿园特级教师，名字叫'小探宝'。
-你的任务是与小朋友进行顺畅、自然、充满童趣的连续多轮互动聊天。
-请在输出中严格返回一个合法的 JSON 对象（绝对不要包含 ```json 等任何 Markdown 标记或多余解释文本），结构如下：
+
+        system_instruction = """你是温柔的幼儿园老师'小探宝'，和小朋友短聊。
+只返回合法 JSON（不要 markdown）：
 {
-  "user_transcript": "（在这里原样填写小朋友的对话输入）",
-  "assistant_reply": "（在这里填写你作为温柔的探奇老师对小朋友的回答，保持简短、充满童趣，控制在 2-4 句话内）",
-  "requires_drawing": true/false（布尔值。判断是否需要画画。若小朋友明确表达画画需求，或对你询问'要不要画出来'表示肯定赞同如回答'好/想画/画一个/想要/画出来/画吧/对呀/嗯嗯'等，必须填 true，否则填 false）,
-  "drawing_prompt": "（如果 requires_drawing 为 true，提取出小朋友想要画画的具体主题与画面场景，结合上下文补充细节如'草地上奔跑的可爱金毛小狗'；若为 false 填空字符串）",
-  "psych_metrics": {
-    "detected_emotions": ["（识别出小朋友说话时的主要情绪，如：快乐、好奇、兴奋、同理心等，填1-2个）"],
-    "linguistic_richness_score": 0.8（小数值，范围0.0~1.0，根据小朋友话语的句子完整度和词汇丰富度进行打分）,
-    "cognitive_milestone_ref": "前运算符号思维（标注当前认知特征）",
-    "attention_span_seconds": 15,
-    "key_interests": ["（提取小朋友话语中的核心关切或兴趣事物，如：小狗、恐龙、积木等，填1-2个）"],
-    "requires_attention": false
-  }
+  "user_transcript": "原样填写孩子的话",
+  "assistant_reply": "1-2句童趣回复",
+  "requires_drawing": false,
+  "drawing_prompt": "",
+  "psych_metrics": {"detected_emotions": [], "key_interests": []}
 }
-【重要引导与对话规则】
-1. 连续陪伴：结合之前的对话记录，像知心朋友一样亲切自然地与小朋友互动。
-2. 敏锐捕捉绘画意图：当小朋友直接说想画什么，或者对你询问是否要画画表示肯定（例如你问'想不想画出来'，孩子说'好呀/要/画一个/想'），必须将 requires_drawing 设为 true，并给出温暖期待的肯定回应（如'太棒啦！探奇老师马上就为你画[主题]，画完后会自动打印出来哦！你接着跟探奇老师聊聊...'）。
-3. 主动引导画画：如果收到系统提示 ask_to_draw，请在你的回复末尾，极其自然且充满童趣地主动询问小朋友：'宝贝，你想不想让探奇老师把我们刚才聊的[具体事物]画出来呀？'"""
+规则：
+1. requires_drawing=true 仅当孩子明确要画画（如帮我画/画一只小狗），或对你刚才'要不要画出来'作简短肯定（好/要/画吧）。
+2. 问候、闲聊、'没看到画'不要画。requires_drawing=true 时 drawing_prompt 写具体画面（如草地上的可爱小狗），不要写'画出来'或问候语。
+3. ask_to_draw 时在回复末尾自然问一句要不要画刚才聊的主题。"""
 
         try:
             print(f"[DEBUG] [DOUBAO_TEXT] Sending chat to {self.audio_model} (ask_to_draw={ask_to_draw})...")
-            
+
             messages = [{"role": "system", "content": system_instruction}]
             if history:
-                for item in history[-6:]:
+                for item in history[-3:]:
                     u_text = item.get("user_text", "")
                     a_resp = item.get("ai_response", "")
                     if u_text:
                         messages.append({"role": "user", "content": u_text})
                     if a_resp:
-                        messages.append({"role": "assistant", "content": a_resp})
+                        # Truncate long history replies to keep latency down
+                        messages.append({"role": "assistant", "content": (a_resp[:120] + "…") if len(a_resp) > 120 else a_resp})
 
             user_content = text_prompt
             if ask_to_draw:
-                user_content += "\n（系统提示：现在是阶段引导时机，请在你的回复最后主动且自然地询问小朋友，想不想把你俩刚才聊到的事物画出来）"
+                user_content += "\n（系统：请在回复末尾自然问问要不要把刚才聊的画出来）"
 
             messages.append({"role": "user", "content": user_content})
 
             response = self.client.chat.completions.create(
                 model=self.audio_model,
                 messages=messages,
-                timeout=15
+                max_tokens=280,
+                temperature=0.7,
+                timeout=12
             )
             content = response.choices[0].message.content
             print(f"[DEBUG] [DOUBAO_TEXT] Raw response: '{content}'")
-            
+
             content_clean = content.strip()
             if content_clean.startswith("```"):
                 lines = content_clean.split("\n")
                 if lines[0].startswith("```json") or lines[0].startswith("```"):
                     content_clean = "\n".join(lines[1:-1])
-            
+
             parsed_data = json.loads(content_clean)
+            # Ensure required keys exist
+            parsed_data.setdefault("requires_drawing", False)
+            parsed_data.setdefault("drawing_prompt", "")
+            parsed_data.setdefault("psych_metrics", {})
             return parsed_data
         except Exception as e:
             print(f"[ERROR] [DOUBAO_TEXT] Error in unified text chat: {e}")
             raise e
 
     def generate_speech(self, text: str, voice_name: Optional[str] = None) -> Optional[str]:
-        """TTS: Doubao TTS V3 primary, Ark VoiceDesign / SiliconFlow fallbacks."""
+        """TTS: Doubao TTS V3 primary, SiliconFlow / OpenAI fallbacks."""
         return DeepSeekAPI.get_instance().generate_speech(text, voice_name=voice_name)
 
     def generate_speech_bytes(self, text: str, voice_name: Optional[str] = None) -> Optional[bytes]:

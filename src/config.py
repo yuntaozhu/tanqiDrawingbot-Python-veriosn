@@ -36,7 +36,7 @@ TTS_API_KEY = _tts_key
 TTS_BASE_URL = _tts_url
 
 SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
-SILICONFLOW_STT_MODEL = os.getenv("SILICONFLOW_STT_MODEL", "SYSTRAN/faster-whisper-large-v3")
+SILICONFLOW_STT_MODEL = os.getenv("SILICONFLOW_STT_MODEL", "FunAudioLLM/SenseVoiceSmall")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
