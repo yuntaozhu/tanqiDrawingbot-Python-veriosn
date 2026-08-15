@@ -682,8 +682,8 @@ async def _execute_drawing_with_fusion(
 async def _resolve_doubao_dialog(prompt_input: Any, llm_cache: LLMCacheManager) -> tuple:
     """
     Resolve user dialog via Doubao:
-    - bytes: unified_audio_chat → STT fallback → unified_text_chat
-    - str: unified_text_chat
+    - bytes: fast STT (~0.3s) → Doubao unified_text_chat (~0.8s)
+    - str: Doubao unified_text_chat (~0.8s)
     Returns (res_data, stt_duration, llm_duration).
     """
     doubao = DoubaoAPI.get_instance()
@@ -692,32 +692,22 @@ async def _resolve_doubao_dialog(prompt_input: Any, llm_cache: LLMCacheManager) 
     res_data = None
 
     if isinstance(prompt_input, bytes):
-        llm_start = time.time()
-        try:
-            logger.info("[DOUBAO] Attempting unified_audio_chat (end-to-end)...")
-            res_data = doubao.unified_audio_chat(prompt_input)
-        except Exception as audio_err:
-            logger.warning(f"[DOUBAO] unified_audio_chat failed: {audio_err}")
-        llm_duration = time.time() - llm_start
-        logger.info(f"[DOUBAO] unified_audio_chat took {llm_duration:.2f}s")
+        stt_start = time.time()
+        user_text = doubao.transcribe_audio(prompt_input)
+        stt_duration = time.time() - stt_start
+        logger.info(f"[STT] Audio transcribed in {stt_duration:.2f}s. Result: '{user_text}'")
 
-        if not res_data:
-            stt_start = time.time()
-            user_text = doubao.transcribe_audio(prompt_input)
-            stt_duration = time.time() - stt_start
-            logger.info(f"[DOUBAO] STT fallback took {stt_duration:.2f}s. Result: '{user_text}'")
+        if user_text:
+            cached_res = llm_cache.get(user_text)
+            if cached_res:
+                return cached_res, stt_duration, llm_duration
 
-            if user_text:
-                cached_res = llm_cache.get(user_text)
-                if cached_res:
-                    return cached_res, stt_duration, llm_duration
-
-                llm_start = time.time()
-                try:
-                    res_data = doubao.unified_text_chat(user_text)
-                except Exception as text_err:
-                    logger.warning(f"[DOUBAO] unified_text_chat after STT failed: {text_err}")
-                llm_duration = time.time() - llm_start
+            llm_start = time.time()
+            try:
+                res_data = doubao.unified_text_chat(user_text)
+            except Exception as text_err:
+                logger.warning(f"[DOUBAO] unified_text_chat after STT failed: {text_err}")
+            llm_duration = time.time() - llm_start
 
         if not res_data:
             res_data = _empty_audio_response()
@@ -781,6 +771,7 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
 
             action = None
             image_url_result = None
+            audio_base64 = None
             voice_config = get_device_settings(device_token)
 
             draw_task = None
@@ -798,7 +789,24 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
                     asyncio.to_thread(doubao.generate_speech, text_response, voice_config)
                 )
 
-            if draw_task:
+            if draw_task and tts_task:
+                results = await asyncio.gather(draw_task, tts_task, return_exceptions=True)
+                draw_res, tts_res = results[0], results[1]
+                draw_duration = time.time() - draw_start
+                tts_duration = time.time() - tts_start
+                if isinstance(draw_res, Exception):
+                    logger.error(f"[DOUBAO] Fusion drawing failed: {draw_res}")
+                else:
+                    action = draw_res
+                    if action:
+                        image_url_result = action.get("image_url")
+                        logger.info(f"[DOUBAO] Drawing print job created: {action.get('job_id')}")
+                if isinstance(tts_res, Exception):
+                    logger.error(f"[DOUBAO] Speech gen failed: {tts_res}")
+                else:
+                    audio_base64 = tts_res
+                logger.info(f"[DOUBAO] Parallel draw+tts completed (draw: {draw_duration:.2f}s, tts: {tts_duration:.2f}s)")
+            elif draw_task:
                 try:
                     action = await draw_task
                     draw_duration = time.time() - draw_start
@@ -808,15 +816,14 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
                 except Exception as draw_err:
                     draw_duration = time.time() - draw_start
                     logger.error(f"[DOUBAO] Fusion drawing failed: {draw_err}")
-
-            audio_base64 = None
-            if tts_task:
+            elif tts_task:
                 try:
                     audio_base64 = await tts_task
+                    tts_duration = time.time() - tts_start
+                    logger.info(f"[DOUBAO] TTS took {tts_duration:.2f}s")
                 except Exception as tts_err:
+                    tts_duration = time.time() - tts_start
                     logger.error(f"[DOUBAO] Speech gen failed: {tts_err}")
-                tts_duration = time.time() - tts_start
-                logger.info(f"[DOUBAO] TTS took {tts_duration:.2f}s")
 
             embedding_available = False
             embed_start = time.time()

@@ -229,15 +229,17 @@ class DeepSeekAPI:
         
         # 1. Primary STT from Env
         if STT_API_KEY:
-            providers.append({"name": "Primary (Env)", "key": STT_API_KEY, "url": STT_BASE_URL})
+            sf_model = STT_MODEL or ("FunAudioLLM/SenseVoiceSmall" if "siliconflow" in STT_BASE_URL.lower() else "whisper-1")
+            providers.append({"name": "Primary (Env)", "key": STT_API_KEY, "url": STT_BASE_URL, "model": sf_model})
             
-        # 2. SiliconFlow Fallback
-        if SILICONFLOW_API_KEY:
+        # 2. SiliconFlow Fallback with faster-whisper
+        sf_key = SILICONFLOW_API_KEY or (STT_API_KEY if "siliconflow" in STT_BASE_URL.lower() else None)
+        if sf_key:
             providers.append({
-                "name": "SiliconFlow", 
-                "key": SILICONFLOW_API_KEY, 
+                "name": "SiliconFlow-Whisper", 
+                "key": sf_key, 
                 "url": "https://api.siliconflow.cn/v1",
-                "model": SILICONFLOW_STT_MODEL
+                "model": "SYSTRAN/faster-whisper-large-v3"
             })
             
         # 3. OpenAI Fallback
@@ -257,17 +259,6 @@ class DeepSeekAPI:
                  "url": self.base_url,
                  "model": os.getenv("DEEPSEEK_STT_MODEL", "whisper-1")
              })
-
-        # Override model for primary if provided
-        if STT_MODEL and providers:
-            providers[0]["model"] = STT_MODEL
-        elif STT_BASE_URL and "siliconflow.cn" in STT_BASE_URL.lower() and providers:
-            # Default for SiliconFlow if not explicit
-            providers[0]["model"] = "FunAudioLLM/SenseVoiceSmall"
-            providers[0]["name"] = "SiliconFlow (Env)"
-        elif STT_API_KEY and providers:
-            # Fallback to whisper-1 for generic OpenAI-compatible providers
-            providers[0]["model"] = "whisper-1"
 
         if not providers:
             print("[ERROR] [STT] No valid STT providers configured in environment variables.")
@@ -747,75 +738,16 @@ class DoubaoAPI:
         
         return [0.0] * 1024
 
-    @retry_with_backoff(max_retries=2)
     def unified_audio_chat(self, audio_bytes: bytes) -> Optional[Dict[str, Any]]:
-        if not self.client:
-            raise ValueError("ARK_API_KEY is not set.")
-        
-        processed_audio = preprocess_audio(audio_bytes)
-        if not processed_audio:
-            print("[DEBUG] [DOUBAO_AUDIO] Audio is silent or empty.")
+        """Fast unified audio chat: STT audio recognition + Doubao LLM child conversation & psych analysis."""
+        user_text = self.transcribe_audio(audio_bytes)
+        if not user_text:
             return None
-            
-        base64_audio = base64.b64encode(processed_audio).decode('utf-8')
-        
-        system_instruction = """你是一位极其温柔、懂得儿童心理学的幼儿园特级教师，名字叫'小探宝'。
-你的任务是与小朋友进行顺畅好玩的互动聊天。请仔细聆听小朋友的录音，并在输出中严格返回一个 JSON 对象，结构如下：
-{
-  "user_transcript": "（在这里填写你听写出的小朋友的录音原话，必须是中文）",
-  "assistant_reply": "（在这里填写你作为温柔的探奇老师对小朋友的回答，保持简短、充满童趣，控制在 3-5 句话内）",
-  "requires_drawing": true/false（布尔值，判断小朋友是否有画画的需求，比如提到“画一个...”、“想要一个画”等）,
-  "drawing_prompt": "（如果requires_drawing为true，在此处提取出小朋友想要画画的具体主题，如'小猫'、'红色的赛车'，否则填空字符串）",
-  "psych_metrics": {
-    "detected_emotions": ["（识别出小朋友说话时的主要情绪，如：快乐、同理心、悲伤、焦虑、好奇、愤怒等，可以填1-2个）"],
-    "linguistic_richness_score": （小数值，范围0.0~1.0，根据小朋友话语的句子完整度和词汇丰富度进行打分）,
-    "cognitive_milestone_ref": "（根据小朋友表达的特征，标注其当前的心理与认知发展特征，如：感知运动阶段、前运算符号思维、同理心萌芽等）",
-    "attention_span_seconds": 15（估算的小朋友专注时长，默认15即可）,
-    "key_interests": ["（提取小朋友话语中的核心关切或兴趣，如：小动物、天气、玩具、大自然等，可填1-2个）"],
-    "requires_attention": false（布尔值，若识别到极度消极、焦虑、恐惧、分离焦虑或明显异常心理，则填true，否则为false）
-  }
-}
-请确保你的回复必须是合法的 JSON 对象。绝对不能包含 markdown 格式标记（如 ```json 等），也不能有任何 JSON 以外的解释文本。"""
+        return self.unified_text_chat(user_text)
 
-        try:
-            print(f"[DEBUG] [DOUBAO_AUDIO] Sending audio chat to {self.audio_model}...")
-            response = self.client.chat.completions.create(
-                model=self.audio_model,
-                messages=[
-                    {"role": "system", "content": system_instruction},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_audio",
-                                "input_audio": {
-                                    "data": base64_audio,
-                                    "format": "wav"
-                                }
-                            },
-                            {
-                                "type": "text",
-                                "text": "这是小朋友刚才说的话，请你识别并温柔地回答。如果他提到了想要画画，请引导并鼓励他描述想画什么。"
-                            }
-                        ]
-                    }
-                ],
-                timeout=15
-            )
-            content = response.choices[0].message.content
-            print(f"[DEBUG] [DOUBAO_AUDIO] Raw response: '{content}'")
-            
-            content_clean = content.strip()
-            if content_clean.startswith("```"):
-                lines = content_clean.split("\n")
-                if lines[0].startswith("```json") or lines[0].startswith("```"):
-                    content_clean = "\n".join(lines[1:-1])
-            
-            parsed_data = json.loads(content_clean)
-            return parsed_data
-        except Exception as e:
-            print(f"[ERROR] [DOUBAO_AUDIO] Error in unified audio chat: {e}")
-            raise e
+    def transcribe_audio(self, audio_bytes: bytes) -> str:
+        """Transcribe audio using high-speed STT providers (SiliconFlow SenseVoiceSmall / faster-whisper)."""
+        return DeepSeekAPI.get_instance().transcribe_audio(audio_bytes)
 
     @retry_with_backoff(max_retries=2)
     def unified_text_chat(self, text_prompt: str) -> Optional[Dict[str, Any]]:
@@ -864,51 +796,6 @@ class DoubaoAPI:
         except Exception as e:
             print(f"[ERROR] [DOUBAO_TEXT] Error in unified text chat: {e}")
             raise e
-
-    @retry_with_backoff(max_retries=2)
-    def transcribe_audio(self, audio_bytes: bytes) -> str:
-        """Transcribe audio using Doubao audio model (fallback when unified_audio_chat fails)."""
-        if not self.client:
-            return ""
-
-        processed_audio = preprocess_audio(audio_bytes)
-        if not processed_audio or len(processed_audio) < 100:
-            print("[DEBUG] [DOUBAO_STT] Audio too short or empty after preprocessing.")
-            return ""
-
-        base64_audio = base64.b64encode(processed_audio).decode("utf-8")
-        try:
-            print(f"[DEBUG] [DOUBAO_STT] Transcribing via {self.audio_model}...")
-            response = self.client.chat.completions.create(
-                model=self.audio_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "你是专业的中文语音识别助手。"
-                            "请准确听写录音中小朋友说的中文原话。"
-                            "只输出听写文本，不要添加任何解释、标点以外的内容。"
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_audio",
-                                "input_audio": {"data": base64_audio, "format": "wav"},
-                            },
-                            {"type": "text", "text": "请听写这段录音中的中文内容。"},
-                        ],
-                    },
-                ],
-                timeout=15,
-            )
-            text = (response.choices[0].message.content or "").strip()
-            print(f"[DEBUG] [DOUBAO_STT] Result: '{text}'")
-            return text
-        except Exception as e:
-            print(f"[ERROR] [DOUBAO_STT] Transcription failed: {e}")
-            return ""
 
     def generate_speech(self, text: str, voice_name: Optional[str] = None) -> Optional[str]:
         """TTS: Doubao TTS V3 primary, Ark VoiceDesign / SiliconFlow fallbacks."""

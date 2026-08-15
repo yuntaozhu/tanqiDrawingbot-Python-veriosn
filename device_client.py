@@ -139,7 +139,7 @@ def record_audio_dynamic(filename="voice_input.wav", fs=16000):
     write_wav(filename, fs, audio_np)
     return filename
 
-def record_audio_auto_vad(filename="voice_input.wav", fs=16000, silence_timeout=1.5, threshold=600):
+def record_audio_auto_vad(filename="voice_input.wav", fs=16000, silence_timeout=1.2, threshold=500):
     """
     Continuous Voice Activity Detection (Auto-VAD) recording.
     Listens to the microphone continuously. Automatically starts recording when
@@ -269,8 +269,9 @@ def log(msg, level="INFO"):
 
 def play_audio(filepath):
     """
-    Robust, cross-platform audio playback module.
-    Attempts to play MP3 or WAV audio using common command-line utility fallbacks.
+    Robust, fast cross-platform audio playback module.
+    Attempts to play MP3 or WAV audio using native Python audio engines first,
+    falling back to common command-line utilities.
     """
     if IS_MICROPYTHON:
          log("Audio playback not natively supported on raw MicroPython core without hardware DAC.", "WARNING")
@@ -282,7 +283,39 @@ def play_audio(filepath):
         
     log(f"播放探奇老师语音中 ({os.path.basename(filepath)})...", "DEBUG")
     
-    # 1. Play on Windows via PowerShell
+    # 1. Ultra-fast Windows built-in winsound for WAV
+    if sys.platform == "win32" and filepath.lower().endswith(".wav"):
+        try:
+            import winsound
+            winsound.PlaySound(filepath, winsound.SND_FILENAME)
+            return True
+        except Exception:
+            pass
+
+    # 2. Try fast python libraries (sounddevice / soundfile / pygame)
+    try:
+        import sounddevice as sd
+        import soundfile as sf
+        data, fs = sf.read(filepath)
+        sd.play(data, fs)
+        sd.wait()
+        return True
+    except (ImportError, Exception):
+        pass
+
+    try:
+        import pygame
+        pygame.mixer.init()
+        pygame.mixer.music.load(filepath)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            time.sleep(0.05)
+        pygame.mixer.quit()
+        return True
+    except (ImportError, Exception):
+        pass
+
+    # 3. Play on Windows via PowerShell
     if sys.platform == "win32":
         try:
             import subprocess
@@ -300,7 +333,7 @@ def play_audio(filepath):
             except:
                 pass
             
-    # 2. Play on macOS via afplay
+    # 4. Play on macOS via afplay
     if sys.platform == "darwin":
         try:
             import subprocess
@@ -309,7 +342,7 @@ def play_audio(filepath):
         except:
             pass
             
-    # 3. Generic Linux / Unix command-line utility fallbacks
+    # 5. Generic Linux / Unix command-line utility fallbacks
     players = ['ffplay', 'mpg123', 'mpv', 'aplay', 'paplay']
     for player in players:
         try:
@@ -327,19 +360,6 @@ def play_audio(filepath):
             return True
         except (subprocess.SubprocessError, FileNotFoundError):
             continue
-            
-    # 4. Try using standard python libraries if installed
-    try:
-        import sounddevice as sd
-        import soundfile as sf
-        data, fs = sf.read(filepath)
-        sd.play(data, fs)
-        sd.wait()
-        return True
-    except ImportError:
-        pass
-    except Exception as e:
-        log(f"Standard library sound playback failed: {e}", "DEBUG")
         
     log(f"语音响应已保存至: {filepath} (未检测到系统扬声器/播放工具，请直接在本地播放该文件)", "WARNING")
     return False
@@ -378,6 +398,7 @@ def get_headers(content_type='application/json'):
         'x-device-token': DEVICE_TOKEN,
         'Authorization': f'Bearer {DEVICE_TOKEN}',
         'Content-Type': content_type,
+        'Accept': 'application/json',
         'User-Agent': 'SuperEgoDevice/1.1'
     }
 
@@ -469,7 +490,7 @@ def send_chat_command(text, silent=False):
     """
     Sends text to the chat endpoint.
     """
-    url = f"{BASE_URL}/api/device/v1/chat"
+    url = f"{BASE_URL}/api/device/v1/chat?stream=false"
     
     if not silent:
         log(f"Sending text: {text}", "DEBUG")
