@@ -34,6 +34,9 @@ def create_session():
 
 session = create_session()
 
+# Soft-pause ready-drawing polls while a voice request is waiting on the server
+_voice_busy = False
+
 def log(msg, level="INFO"):
     if level == "DEBUG":
         logger.debug(msg)
@@ -496,15 +499,19 @@ def check_ready_drawings():
     url = f"{BASE_URL}/api/device/v1/drawings/ready"
     headers = get_headers()
     try:
-        res = session.get(url, headers=headers, allow_redirects=False, timeout=15)
+        # Short timeout so preview polls never starve voice/chat responses
+        res = session.get(url, headers=headers, allow_redirects=False, timeout=5)
         if res.status_code == 200:
             data = res.json()
             res.close()
             return data
         res.close()
         return None
+    except requests.exceptions.Timeout:
+        # Expected under load — voice path holds the server briefly
+        return None
     except Exception as e:
-        log(f"Exception polling ready drawings: {e}", "ERROR")
+        log(f"Exception polling ready drawings: {e}", "DEBUG")
         return None
 
 def confirm_and_print_job(job_id):
@@ -566,6 +573,7 @@ def send_chat_command(text, silent=False):
     """
     Sends text to the chat endpoint.
     """
+    global _voice_busy
     url = f"{BASE_URL}/api/device/v1/chat?stream=false"
     
     if not silent:
@@ -573,7 +581,13 @@ def send_chat_command(text, silent=False):
     headers = get_headers()
     
     try:
-        res = session.post(url, json={"text": text}, headers=headers, allow_redirects=False)
+        _voice_busy = True
+        try:
+            res = session.post(
+                url, json={"text": text}, headers=headers, allow_redirects=False, timeout=45
+            )
+        finally:
+            _voice_busy = False
         if res.status_code == 200:
             try:
                 data = res.json()
@@ -619,6 +633,7 @@ def send_chat_command(text, silent=False):
             res.close()
             return None
     except Exception as e:
+        _voice_busy = False
         log(f"Exception in chat request: {e}", "ERROR")
         return None
 
@@ -678,6 +693,7 @@ def send_voice_file(filepath, silent=False):
     """
     Sends an audio file to the voice endpoint and plays back the reply.
     """
+    global _voice_busy
     url = f"{BASE_URL}/api/device/v1/voice"
     
     try:
@@ -688,7 +704,14 @@ def send_voice_file(filepath, silent=False):
             log(f"Sending audio file: {filepath} ({len(audio_data)} bytes)", "DEBUG")
         
         headers = get_headers('audio/wav')
-        res = session.post(url, data=audio_data, headers=headers, allow_redirects=False)
+        _voice_busy = True
+        try:
+            # Voice pipeline (STT+LLM+TTS) often needs 20–45s; avoid client ReadTimeout
+            res = session.post(
+                url, data=audio_data, headers=headers, allow_redirects=False, timeout=60
+            )
+        finally:
+            _voice_busy = False
         
         if res.status_code == 200:
             try:
@@ -736,6 +759,7 @@ def send_voice_file(filepath, silent=False):
             res.close()
             return None
     except Exception as e:
+        _voice_busy = False
         log(f"Exception sending voice file: {e}", "ERROR")
         return None
 
@@ -743,10 +767,14 @@ def background_preview_worker():
     """Poll for ready drawings and save local previews. Does NOT auto-print."""
     while True:
         try:
+            if _voice_busy:
+                # Avoid competing with the in-flight voice HTTP request
+                time.sleep(5.0)
+                continue
             preview_ready_drawings_once()
         except Exception:
             pass
-        time.sleep(3.0)
+        time.sleep(5.0)
 
 # -----------------------------------------------------------------------------
 # Main Call / Dialogue Service

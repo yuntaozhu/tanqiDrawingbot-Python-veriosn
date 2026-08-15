@@ -814,8 +814,9 @@ async def _resolve_doubao_dialog(
 ) -> tuple:
     """
     Resolve user dialog via Doubao:
-    - bytes: fast STT (~0.3s) → Doubao unified_text_chat (~0.8s)
-    - str: Doubao unified_text_chat (~0.8s)
+    - bytes: STT → unified_text_chat
+    - str: unified_text_chat
+    Sync SDK calls run in asyncio.to_thread so /drawings/ready etc. stay responsive.
     Returns (res_data, stt_duration, llm_duration).
     """
     doubao = DoubaoAPI.get_instance()
@@ -825,14 +826,16 @@ async def _resolve_doubao_dialog(
 
     if isinstance(prompt_input, bytes):
         stt_start = time.time()
-        user_text = doubao.transcribe_audio(prompt_input)
+        user_text = await asyncio.to_thread(doubao.transcribe_audio, prompt_input)
         stt_duration = time.time() - stt_start
         logger.info(f"[STT] Audio transcribed in {stt_duration:.2f}s. Result: '{user_text}'")
 
         if user_text:
             llm_start = time.time()
             try:
-                res_data = doubao.unified_text_chat(user_text, history=history, ask_to_draw=ask_to_draw)
+                res_data = await asyncio.to_thread(
+                    doubao.unified_text_chat, user_text, history, ask_to_draw
+                )
             except Exception as text_err:
                 logger.warning(f"[DOUBAO] unified_text_chat after STT failed: {text_err}")
             llm_duration = time.time() - llm_start
@@ -842,7 +845,9 @@ async def _resolve_doubao_dialog(
     else:
         llm_start = time.time()
         try:
-            res_data = doubao.unified_text_chat(prompt_input, history=history, ask_to_draw=ask_to_draw)
+            res_data = await asyncio.to_thread(
+                doubao.unified_text_chat, prompt_input, history, ask_to_draw
+            )
         except Exception as text_err:
             logger.warning(f"[DOUBAO] unified_text_chat failed: {text_err}")
         llm_duration = time.time() - llm_start

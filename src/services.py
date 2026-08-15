@@ -742,14 +742,17 @@ class DoubaoAPI:
 
             messages = [{"role": "system", "content": system_instruction}]
             if history:
-                for item in history[-3:]:
-                    u_text = item.get("user_text", "")
-                    a_resp = item.get("ai_response", "")
+                for item in history[-2:]:
+                    u_text = (item.get("user_text") or "")[:80]
+                    a_resp = item.get("ai_response") or ""
                     if u_text:
                         messages.append({"role": "user", "content": u_text})
                     if a_resp:
                         # Truncate long history replies to keep latency down
-                        messages.append({"role": "assistant", "content": (a_resp[:120] + "…") if len(a_resp) > 120 else a_resp})
+                        messages.append({
+                            "role": "assistant",
+                            "content": (a_resp[:80] + "…") if len(a_resp) > 80 else a_resp,
+                        })
 
             user_content = text_prompt
             if ask_to_draw:
@@ -760,9 +763,9 @@ class DoubaoAPI:
             response = self.client.chat.completions.create(
                 model=self.audio_model,
                 messages=messages,
-                max_tokens=280,
+                max_tokens=180,
                 temperature=0.7,
-                timeout=12
+                timeout=10
             )
             content = response.choices[0].message.content
             print(f"[DEBUG] [DOUBAO_TEXT] Raw response: '{content}'")

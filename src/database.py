@@ -26,26 +26,47 @@ _db_initialized = False
 _db_init_lock = threading.Lock()
 
 def _migrate_print_jobs_columns():
-    """Add device_token/status to print_jobs if missing (Postgres/SQLite)."""
-    from sqlalchemy import text
-    stmts = [
-        "ALTER TABLE print_jobs ADD COLUMN device_token VARCHAR",
-        "ALTER TABLE print_jobs ADD COLUMN status VARCHAR DEFAULT 'ready'",
-    ]
-    with engine.begin() as conn:
-        for stmt in stmts:
-            try:
-                conn.execute(text(stmt))
-                print(f"[INFO] [DB] Migration applied: {stmt}")
-            except Exception as e:
-                # Column already exists — ignore
-                msg = str(e).lower()
-                if "duplicate" in msg or "already exists" in msg or "exists" in msg:
-                    pass
-                else:
-                    print(f"[DEBUG] [DB] Migration skip/fail ({stmt}): {e}")
+    """Add device_token/status to print_jobs if missing (Postgres/SQLite).
+
+    Each ALTER runs in its own transaction so a 'column already exists' error
+    on Postgres does not abort the whole batch (InFailedSqlTransaction).
+    """
+    from sqlalchemy import text, inspect
+
+    def _has_column(table: str, column: str) -> bool:
         try:
-            conn.execute(text("UPDATE print_jobs SET status = 'ready' WHERE status IS NULL OR status = '' OR status = 'pending'"))
+            cols = {c["name"] for c in inspect(engine).get_columns(table)}
+            return column in cols
+        except Exception:
+            return False
+
+    migrations = [
+        ("device_token", "ALTER TABLE print_jobs ADD COLUMN device_token VARCHAR"),
+        ("status", "ALTER TABLE print_jobs ADD COLUMN status VARCHAR DEFAULT 'ready'"),
+    ]
+    for col, stmt in migrations:
+        if _has_column("print_jobs", col):
+            continue
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(stmt))
+            print(f"[INFO] [DB] Migration applied: {stmt}")
+        except Exception as e:
+            msg = str(e).lower()
+            if "duplicate" in msg or "already exists" in msg or "exists" in msg:
+                pass
+            else:
+                print(f"[DEBUG] [DB] Migration skip/fail ({stmt}): {e}")
+
+    if _has_column("print_jobs", "status"):
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE print_jobs SET status = 'ready' "
+                        "WHERE status IS NULL OR status = '' OR status = 'pending'"
+                    )
+                )
         except Exception as e:
             print(f"[DEBUG] [DB] status backfill skip: {e}")
 
