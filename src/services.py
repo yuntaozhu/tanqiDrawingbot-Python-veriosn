@@ -865,6 +865,59 @@ class DoubaoAPI:
             print(f"[ERROR] [DOUBAO_TEXT] Error in unified text chat: {e}")
             raise e
 
+    @retry_with_backoff(max_retries=2)
+    def transcribe_audio(self, audio_bytes: bytes) -> str:
+        """Transcribe audio using Doubao audio model (fallback when unified_audio_chat fails)."""
+        if not self.client:
+            return ""
+
+        processed_audio = preprocess_audio(audio_bytes)
+        if not processed_audio or len(processed_audio) < 100:
+            print("[DEBUG] [DOUBAO_STT] Audio too short or empty after preprocessing.")
+            return ""
+
+        base64_audio = base64.b64encode(processed_audio).decode("utf-8")
+        try:
+            print(f"[DEBUG] [DOUBAO_STT] Transcribing via {self.audio_model}...")
+            response = self.client.chat.completions.create(
+                model=self.audio_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是专业的中文语音识别助手。"
+                            "请准确听写录音中小朋友说的中文原话。"
+                            "只输出听写文本，不要添加任何解释、标点以外的内容。"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_audio",
+                                "input_audio": {"data": base64_audio, "format": "wav"},
+                            },
+                            {"type": "text", "text": "请听写这段录音中的中文内容。"},
+                        ],
+                    },
+                ],
+                timeout=15,
+            )
+            text = (response.choices[0].message.content or "").strip()
+            print(f"[DEBUG] [DOUBAO_STT] Result: '{text}'")
+            return text
+        except Exception as e:
+            print(f"[ERROR] [DOUBAO_STT] Transcription failed: {e}")
+            return ""
+
+    def generate_speech(self, text: str, voice_name: Optional[str] = None) -> Optional[str]:
+        """TTS: Doubao TTS V3 primary, Ark VoiceDesign / SiliconFlow fallbacks."""
+        return DeepSeekAPI.get_instance().generate_speech(text, voice_name=voice_name)
+
+    def generate_speech_bytes(self, text: str, voice_name: Optional[str] = None) -> Optional[bytes]:
+        """TTS returning raw audio bytes."""
+        return DeepSeekAPI.get_instance().generate_speech_bytes(text, voice_name=voice_name)
+
 
 class ReplicateAPI:
     _instance = None

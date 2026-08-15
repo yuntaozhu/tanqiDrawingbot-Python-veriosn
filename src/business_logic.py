@@ -9,7 +9,7 @@ import numpy as np
 from src.logger import setup_logger
 logger = setup_logger("business_logic")
 
-from src.config import DEEPSEEK_API_KEY, ADMIN_KEY
+from src.config import ARK_API_KEY, ADMIN_KEY
 from src.cache import DrawingCacheManager, LLMCacheManager
 from src.crud import (
     save_history_to_db, save_print_job_to_db, save_psych_vector, 
@@ -23,6 +23,8 @@ from src.services import (
     DeepSeekAPI, DoubaoAPI, ReplicateAPI, generate_image_with_fallback,
     VoiceInteractionService
 )
+from src.prompt_fusion import PromptFusionEngine, ConversationContextManager
+from src.conversation_crud import ConversationManager
 
 def similarity_search_vectors(device_token: str, query_embedding: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
     all_entries = query_psych_vectors(device_token)
@@ -557,7 +559,180 @@ async def stream_chat_llm(user_text: str):
         await asyncio.sleep(0.02)
 
 
-async def process_llm_interaction(prompt_input: Any, api_key: str, device_token: str = None) -> Dict[str, Any]:
+def _default_conversation_context(device_token: str) -> Dict[str, Any]:
+    return {
+        "device_token": device_token,
+        "message_history": [],
+        "current_image_url": None,
+        "current_image_bitmap_hex": None,
+        "scene_elements": [],
+        "last_generated_prompt": None,
+        "last_operation_type": None,
+        "last_operation_detail": {},
+    }
+
+
+def _empty_audio_response() -> Dict[str, Any]:
+    return {
+        "user_transcript": "",
+        "assistant_reply": "对不起宝贝，我没听清，能不能请你再说一遍呀？",
+        "requires_drawing": False,
+        "drawing_prompt": "",
+        "psych_metrics": {
+            "detected_emotions": ["困惑"],
+            "linguistic_richness_score": 0.0,
+            "cognitive_milestone_ref": "无",
+            "attention_span_seconds": 15,
+            "key_interests": [],
+            "requires_attention": False,
+        },
+    }
+
+
+def _apply_drawing_heuristics(
+    user_text: str,
+    text_response: str,
+    requires_drawing: bool,
+    drawing_prompt: str,
+    psych_metrics: Dict[str, Any],
+    device_token: str,
+) -> tuple:
+    user_text_lower = user_text.lower() if user_text else ""
+    drawing_keywords = [
+        "画画", "画一个", "画只", "画张", "画条", "画一幅", "画一画",
+        "想要画", "帮我画", "可以画", "画个", "画出", "画",
+    ]
+
+    if user_text_lower and any(kw in user_text_lower for kw in drawing_keywords) and not requires_drawing:
+        logger.debug(f"[HEURISTIC] Forcing requires_drawing=True from user text: '{user_text}'")
+        requires_drawing = True
+
+    if check_assistant_drawing_trigger(text_response) and not requires_drawing:
+        logger.debug("[HEURISTIC] Forcing requires_drawing=True from assistant reply")
+        requires_drawing = True
+
+    if drawing_prompt.strip() and not requires_drawing:
+        requires_drawing = True
+
+    if requires_drawing and not drawing_prompt.strip():
+        conv_context = ConversationManager.get_conversation_context(device_token)
+        extracted = extract_drawing_subject_advanced(user_text, text_response, conv_context)
+        if extracted:
+            drawing_prompt = extracted
+
+    if requires_drawing and not drawing_prompt.strip():
+        interests = psych_metrics.get("key_interests", [])
+        drawing_prompt = f"可爱的{interests[0]}" if interests else "可爱的小兔子"
+
+    return requires_drawing, drawing_prompt
+
+
+async def _execute_drawing_with_fusion(
+    user_text: str,
+    device_token: str,
+    ai_response: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Same PromptFusion drawing pipeline as SSE text chat."""
+    context = ConversationManager.get_conversation_context(device_token)
+    if context is None:
+        context = _default_conversation_context(device_token)
+
+    fusion_inputs = ConversationContextManager.prepare_fusion_inputs(user_text, context)
+    operation = fusion_inputs["operation"]
+    if operation.get("confidence", 0.0) < 0.5:
+        operation["type"] = "create"
+
+    fusion_result = PromptFusionEngine.fuse_drawing_prompt(
+        current_user_text=user_text,
+        operation_type=operation["type"],
+        previous_prompt=fusion_inputs["previous_prompt"],
+        scene_elements=fusion_inputs["scene_elements"],
+    )
+    fused_prompt = fusion_result.get("fused_prompt") or user_text
+    logger.info(f"[DRAWING] Fusion prompt: '{fused_prompt}' (op={operation['type']})")
+
+    action = await async_generate_drawing_with_fusion(fused_prompt, device_token, fusion_result)
+    if not action:
+        return None
+
+    updated_ctx = ConversationContextManager.update_context_after_fusion(
+        dict(context),
+        fusion_result,
+        image_url=action.get("image_url"),
+        bitmap_hex=action.get("bitmap_hex"),
+    )
+    history = list(updated_ctx.get("message_history", []))
+    history.append({
+        "timestamp": time.time(),
+        "user_text": user_text,
+        "ai_response": ai_response,
+        "drawing_triggered": True,
+        "drawing_config": fusion_result,
+        "operation_type": operation["type"],
+        "metadata": {
+            "recognition_confidence": operation.get("confidence", 0),
+            "scene_elements_after": updated_ctx.get("scene_elements", []),
+        },
+    })
+    updated_ctx["message_history"] = history
+    ConversationManager.create_or_update_conversation_context(device_token, updated_ctx)
+    return action
+
+
+async def _resolve_doubao_dialog(prompt_input: Any, llm_cache: LLMCacheManager) -> tuple:
+    """
+    Resolve user dialog via Doubao:
+    - bytes: unified_audio_chat → STT fallback → unified_text_chat
+    - str: unified_text_chat
+    Returns (res_data, stt_duration, llm_duration).
+    """
+    doubao = DoubaoAPI.get_instance()
+    stt_duration = 0.0
+    llm_duration = 0.0
+    res_data = None
+
+    if isinstance(prompt_input, bytes):
+        llm_start = time.time()
+        try:
+            logger.info("[DOUBAO] Attempting unified_audio_chat (end-to-end)...")
+            res_data = doubao.unified_audio_chat(prompt_input)
+        except Exception as audio_err:
+            logger.warning(f"[DOUBAO] unified_audio_chat failed: {audio_err}")
+        llm_duration = time.time() - llm_start
+        logger.info(f"[DOUBAO] unified_audio_chat took {llm_duration:.2f}s")
+
+        if not res_data:
+            stt_start = time.time()
+            user_text = doubao.transcribe_audio(prompt_input)
+            stt_duration = time.time() - stt_start
+            logger.info(f"[DOUBAO] STT fallback took {stt_duration:.2f}s. Result: '{user_text}'")
+
+            if user_text:
+                cached_res = llm_cache.get(user_text)
+                if cached_res:
+                    return cached_res, stt_duration, llm_duration
+
+                llm_start = time.time()
+                try:
+                    res_data = doubao.unified_text_chat(user_text)
+                except Exception as text_err:
+                    logger.warning(f"[DOUBAO] unified_text_chat after STT failed: {text_err}")
+                llm_duration = time.time() - llm_start
+
+        if not res_data:
+            res_data = _empty_audio_response()
+    else:
+        llm_start = time.time()
+        try:
+            res_data = doubao.unified_text_chat(prompt_input)
+        except Exception as text_err:
+            logger.warning(f"[DOUBAO] unified_text_chat failed: {text_err}")
+        llm_duration = time.time() - llm_start
+
+    return res_data, stt_duration, llm_duration
+
+
+async def process_llm_interaction(prompt_input: Any, api_key: str = None, device_token: str = None) -> Dict[str, Any]:
     start_time = time.time()
     stt_duration = 0.0
     llm_duration = 0.0
@@ -567,530 +742,136 @@ async def process_llm_interaction(prompt_input: Any, api_key: str, device_token:
 
     device_token = device_token or "anonymous_device"
     doubao = DoubaoAPI.get_instance()
-    deepseek = DeepSeekAPI.get_instance()
     llm_cache = LLMCacheManager.get_instance()
-    
-    # 0. Check LLM Cache first for Text inputs
+
+    if not doubao.client:
+        raise HTTPException(status_code=500, detail="ARK_API_KEY is not configured")
+
     if isinstance(prompt_input, str):
         cached_res = llm_cache.get(prompt_input)
         if cached_res:
             logger.info(f"[CACHE] 0ms Cache Hit for LLM Text Input: '{prompt_input}'")
             return cached_res
 
-    # Check if Doubao client is configured
-    if doubao.client:
-        try:
-            logger.info(f"[CORE] Attempting Doubao unified pipeline for token: {device_token}...")
-            if isinstance(prompt_input, bytes):
-                # High-speed modular pipeline: Transcribe via SiliconFlow first, then send to text model
-                logger.debug(f"[FAST_PATH] Transcribing audio with fast STT first...")
-                stt_start = time.time()
-                user_text = deepseek.transcribe_audio(prompt_input)
-                stt_duration = time.time() - stt_start
-                logger.info(f"[FAST_PATH] STT took {stt_duration:.2f}s. Result: '{user_text}'")
-                
-                # Check LLM Cache for transcribed text
-                if user_text:
-                    cached_res = llm_cache.get(user_text)
-                    if cached_res:
-                        logger.info(f"[CACHE] 0ms Cache Hit for Transcribed Audio: '{user_text}'")
-                        return cached_res
-                
-                if not user_text:
-                    res_data = {
-                        "user_transcript": "",
-                        "assistant_reply": "对不起宝贝，我没听清，能不能请你再说一遍呀？",
-                        "requires_drawing": False,
-                        "drawing_prompt": "",
-                        "psych_metrics": {
-                            "detected_emotions": ["困惑"],
-                            "linguistic_richness_score": 0.0,
-                            "cognitive_milestone_ref": "无",
-                            "attention_span_seconds": 15,
-                            "key_interests": [],
-                            "requires_attention": False
-                        }
-                    }
-                else:
-                    res_data = None
-                    llm_start = time.time()
-                    if doubao.client:
-                        try:
-                            logger.debug(f"[FAST_PATH] Querying Doubao text-to-JSON model...")
-                            res_data = doubao.unified_text_chat(user_text)
-                        except Exception as db_err:
-                            logger.warning(f"[FAST_PATH] Doubao text-to-JSON failed: {db_err}, trying DeepSeek...")
-                    
-                    if not res_data and deepseek.client:
-                        try:
-                            logger.debug(f"[FAST_PATH] Querying DeepSeek text-to-JSON model...")
-                            res_data = deepseek.unified_text_chat(user_text)
-                        except Exception as ds_err:
-                            logger.warning(f"[FAST_PATH] DeepSeek text-to-JSON failed: {ds_err}")
-                    llm_duration = time.time() - llm_start
-                    logger.info(f"[FAST_PATH] Dialog Text-to-JSON took {llm_duration:.2f}s")
-            else:
-                res_data = None
-                llm_start = time.time()
-                if doubao.client:
-                    try:
-                        logger.debug(f"[FAST_PATH] Querying Doubao text-to-JSON model (text input)...")
-                        res_data = doubao.unified_text_chat(prompt_input)
-                    except Exception as db_err:
-                        logger.warning(f"[CORE] Doubao text chat failed: {db_err}, trying DeepSeek...")
-                if not res_data and deepseek.client:
-                    try:
-                        logger.debug(f"[FAST_PATH] Querying DeepSeek text-to-JSON model (text input)...")
-                        res_data = deepseek.unified_text_chat(prompt_input)
-                    except Exception as ds_err:
-                        logger.warning(f"[CORE] DeepSeek text chat failed: {ds_err}")
-                llm_duration = time.time() - llm_start
-                logger.info(f"[FAST_PATH] Dialog Text-to-JSON took {llm_duration:.2f}s")
-                
-            if res_data:
-                user_text = res_data.get("user_transcript", "")
-                text_response = res_data.get("assistant_reply", "")
-                requires_drawing = parse_bool(res_data.get("requires_drawing", False)) or parse_bool(res_data.get("requires_painting", False))
-                drawing_prompt = res_data.get("drawing_prompt", "") or res_data.get("painting_prompt", "")
-                psych_metrics = res_data.get("psych_metrics", {})
-                
-                # Apply robust checks/heuristics
-                user_text_lower = user_text.lower() if user_text else ""
-                drawing_keywords = ["画画", "画一个", "画只", "画张", "画条", "画一幅", "画一画", "想要画", "帮我画", "可以画", "画个", "画出", "画一画", "画"]
-                
-                # 1. If user transcript explicitly asks to draw, but the LLM boolean was False
-                if user_text_lower and any(kw in user_text_lower for kw in drawing_keywords) and not requires_drawing:
-                    logger.debug(f"[HEURISTIC] Forcing requires_drawing=True due to drawing keywords in user transcript: '{user_text}'")
-                    requires_drawing = True
-                    
-                # 1.5 If teacher response explicitly confirms drawing, force requires_drawing to True
-                if check_assistant_drawing_trigger(text_response) and not requires_drawing:
-                    logger.debug(f"[HEURISTIC] Forcing requires_drawing=True due to drawing triggers in assistant reply: '{text_response}'")
-                    requires_drawing = True
- 
-                # 2. If drawing_prompt is provided but requires_drawing is False, force it to True
-                if drawing_prompt.strip() and not requires_drawing:
-                    logger.debug(f"[HEURISTIC] Forcing requires_drawing=True because drawing_prompt is present: '{drawing_prompt}'")
-                    requires_drawing = True
-                    
-                # 3. If requires_drawing is True but drawing_prompt is empty, extract from user transcript or assistant reply
-                if requires_drawing and not drawing_prompt.strip():
-                    from src.conversation_crud import ConversationManager
-                    conv_context = ConversationManager.get_conversation_context(device_token)
-                    extracted = extract_drawing_subject_advanced(user_text, text_response, conv_context)
-                    if extracted:
-                        logger.debug(f"[HEURISTIC] Extracted drawing prompt '{extracted}' from transcript/reply.")
-                        drawing_prompt = extracted
-                        
-                # 3.5 If requires_drawing is True but drawing_prompt is still empty, use fallback
-                if requires_drawing and not drawing_prompt.strip():
-                    interests = psych_metrics.get("key_interests", [])
-                    if interests:
-                        drawing_prompt = f"可爱的{interests[0]}"
-                        logger.debug(f"[HEURISTIC] No prompt extracted, using fallback from interest: '{drawing_prompt}'")
-                    else:
-                        drawing_prompt = "可爱的小兔子"
-                        logger.debug(f"[HEURISTIC] No prompt extracted, using default fallback: '{drawing_prompt}'")
-                
-                logger.info(f"[DOUBAO] Unified pipeline success. Transcript: '{user_text}', Reply: '{text_response}', Drawing: {requires_drawing} ({drawing_prompt})")
-                
-                action = None
-                image_url_result = None
-                
-                if requires_drawing and drawing_prompt:
-                    logger.info(f"[DOUBAO] Triggering Doubao Seedream image generation for prompt: '{drawing_prompt}'")
-                    draw_start = time.time()
-                    try:
-                        image_urls = doubao.generate_image(drawing_prompt)
-                        if image_urls:
-                            image_url_result = image_urls[0]
-                            processed_image, bitmap_hex = process_line_art_and_bitmap(image_url_result)
-                            
-                            job_id = str(uuid.uuid4())
-                            save_print_job_to_db({
-                                "job_id": job_id,
-                                "image_url": processed_image,
-                                "bitmap_hex": bitmap_hex,
-                                "prompt": drawing_prompt,
-                                "timestamp": time.time()
-                            })
-                            
-                            action = {
-                                "type": "print",
-                                "prompt": drawing_prompt,
-                                "job_id": job_id,
-                                "image_url": processed_image,
-                                "bitmap_hex": bitmap_hex
-                            }
-                            logger.info(f"[DOUBAO] Drawing print job created successfully: {job_id}")
-                            
-                            generation_id = str(uuid.uuid4())
-                            save_history_to_db({
-                                "generation_id": generation_id,
-                                "prompt": drawing_prompt,
-                                "english_prompt": drawing_prompt,
-                                "engine": "doubao-seedream",
-                                "protagonist": None,
-                                "title": f"🎨 {drawing_prompt}",
-                                "aspect_ratio": "1:1",
-                                "num_images": 1,
-                                "style": "default",
-                                "apply_line_art": True,
-                                "image_urls": [processed_image],
-                                "raw_bitmaps": [bitmap_hex],
-                                "timestamp": time.time()
-                            })
-                        else:
-                            raise ValueError("Seedream returned no URLs")
-                    except Exception as draw_err:
-                        logger.warning(f"[DOUBAO] Seedream failed, falling back to legacy fallback generator: {draw_err}")
-                        try:
-                            fallback_res = generate_image_with_fallback(drawing_prompt)
-                            if fallback_res["urls"]:
-                                image_url_result = fallback_res["urls"][0]
-                                processed_image, bitmap_hex = process_line_art_and_bitmap(image_url_result)
-                                job_id = str(uuid.uuid4())
-                                save_print_job_to_db({
-                                    "job_id": job_id,
-                                    "image_url": processed_image,
-                                    "bitmap_hex": bitmap_hex,
-                                    "prompt": drawing_prompt,
-                                    "timestamp": time.time()
-                                })
-                                action = {
-                                    "type": "print",
-                                    "prompt": drawing_prompt,
-                                    "job_id": job_id,
-                                    "image_url": processed_image,
-                                    "bitmap_hex": bitmap_hex
-                                }
-                        except Exception as fb_err:
-                            logger.error(f"[DOUBAO] Fallback generator also failed: {fb_err}")
-                    draw_duration = time.time() - draw_start
-                    logger.info(f"[DOUBAO] Drawing generation and pipeline took {draw_duration:.2f}s")
-                
-                embedding_available = False
-                embed_start = time.time()
-                try:
-                    combined_text = f"儿童原句: {user_text}\nAI回复: {text_response}"
-                    embedding_vector = doubao.generate_embedding(combined_text)
-                    if not embedding_vector or embedding_vector == [0.0] * 1024:
-                        embedding_vector = [0.0] * 1024
-                        embedding_available = False
-                    else:
-                        embedding_available = True
-                        
-                    vector_metadata = {
-                        "psych_metrics": psych_metrics,
-                        "drawing_prompt": drawing_prompt if requires_drawing else None,
-                        "drawing_url": image_url_result if image_url_result else None,
-                        "timestamp": time.time(),
-                        "embedding_valid": embedding_available,
-                        "embedding_available": embedding_available
-                    }
-                    save_psych_vector(
-                        device_token=device_token,
-                        child_text=user_text,
-                        ai_response=text_response,
-                        embedding=embedding_vector,
-                        metadata=vector_metadata
-                    )
-                except Exception as vector_err:
-                    logger.error(f"[DOUBAO_VECTOR] Embedding/Vector DB write failed: {vector_err}")
-                    embedding_available = False
-                embed_duration = time.time() - embed_start
-                logger.info(f"[DOUBAO] Embedding vector and metadata DB write took {embed_duration:.2f}s")
-                
-                audio_base64 = None
-                if text_response:
-                    tts_start = time.time()
-                    try:
-                        voice_config = get_device_settings(device_token)
-                        audio_base64 = deepseek.generate_speech(text_response, voice_name=voice_config)
-                    except Exception as tts_err:
-                        logger.error(f"[DOUBAO] Speech gen failed: {tts_err}")
-                    tts_duration = time.time() - tts_start
-                    logger.info(f"[DOUBAO] Speech TTS generation took {tts_duration:.2f}s")
-                        
-                total_duration = time.time() - start_time
-                
-                # Elegant Performance summary
-                logger.info(
-                    f"\n=================== PERFORMANCE METRICS SUMMARY ===================\n"
-                    f"  [ASR / STT]      : {stt_duration:.2f}s\n"
-                    f"  [LLM / DIALOG]   : {llm_duration:.2f}s\n"
-                    f"  [DRAW / IMAGE]   : {draw_duration:.2f}s\n"
-                    f"  [EMBED / VECTOR] : {embed_duration:.2f}s\n"
-                    f"  [TTS / AUDIO]    : {tts_duration:.2f}s\n"
-                    f"-------------------------------------------------------------------\n"
-                    f"  [TOTAL REQUEST]  : {total_duration:.2f}s\n"
-                    f"==================================================================="
-                )
-                
-                return_payload = {
-                    "text_response": text_response,
-                    "action": action,
-                    "audio_base64": audio_base64,
-                    "stt_empty": False if user_text else True,
-                    "embedding_available": embedding_available
-                }
-                if user_text:
-                    llm_cache.set(user_text, return_payload)
-                return return_payload
-        except Exception as unified_err:
-            print(f"[WARNING] [DOUBAO] Unified pipeline crashed, falling back to standard pipeline: {unified_err}")
- 
-    # Standard Fallback Pipeline
-    user_text = prompt_input
-    if isinstance(prompt_input, bytes):
-        input_len = len(prompt_input)
-        print(f"[DEBUG] [CORE] Received voice input: {input_len} bytes")
-        
-        try:
-            start_stt = time.time()
-            user_text = deepseek.transcribe_audio(prompt_input)
-            stt_duration = time.time() - start_stt
-            print(f"[DEBUG] [CORE] STT took {stt_duration:.2f}s. Result: '{user_text}'")
-        except Exception as e:
-            print(f"[ERROR] [CORE] Failed to transcribe audio after retries: {e}")
-            user_text = ""
-            
-        if not user_text:
-            print("[DEBUG] [CORE] STT returned empty text. Returning fallback message.")
-            error_msg = "对不起，我没听清，能不能请你再说一遍？" 
-            try:
-                voice_config = get_device_settings(device_token)
-                audio_base64 = deepseek.generate_speech(error_msg, voice_name=voice_config)
-            except Exception as e:
-                print(f"[ERROR] [CORE] Failed to generate fallback speech: {e}")
-                audio_base64 = None
-                
-            return {
-                "text_response": error_msg,
-                "action": None,
-                "audio_base64": audio_base64,
-                "stt_empty": True,
-                "raw_len": input_len,
-                "embedding_available": False
-            }
-        print(f"[DEBUG] [CORE] Transcribed Text: '{user_text}'")
-    else:
-        print(f"[DEBUG] [CORE] Received chat input: '{user_text}'")
- 
-    system_instruction = "You are a gentle kindergarten teacher named 'Tanqi' (探奇). Speak in Chinese. If the child asks to draw something, call the generate_drawing function. Keep responses short and sweet."
-    
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "generate_drawing",
-                "description": "Generate a black and white line art drawing for kids based on the prompt.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "prompt": {
-                            "type": "string",
-                            "description": "Visual description of the drawing for children."
-                        }
-                    },
-                    "required": ["prompt"]
-                }
-            }
-        }
-    ]
-    
     try:
-        print(f"[DEBUG] [CORE] Sending text to LLM (DeepSeek)...")
-        res = deepseek.generate_text(user_text, system_instruction=system_instruction, tools=tools)
-        text_response = res.get("text") or ""
-        tool_calls = res.get("tool_calls")
-        
-        print(f"[DEBUG] [CORE] LLM Response: '{text_response[:100]}...' | Tool calls: {len(tool_calls) if tool_calls else 0}")
-        
-        action = None
-        
-        if tool_calls:
-            call = tool_calls[0]
-            if call.function.name == "generate_drawing":
-                args = json.loads(call.function.arguments)
-                prompt = args.get("prompt")
-                print(f"[DEBUG] [CORE] LLM requested drawing: '{prompt}'")
-                
+        logger.info(f"[CORE] Doubao pipeline for token: {device_token}...")
+        dialog_result = await _resolve_doubao_dialog(prompt_input, llm_cache)
+        res_data, stt_duration, llm_duration = dialog_result
+
+        # Full cached voice/text response from STT cache hit
+        if res_data and "text_response" in res_data and "assistant_reply" not in res_data:
+            return res_data
+
+        if res_data:
+            user_text = res_data.get("user_transcript", "")
+            text_response = res_data.get("assistant_reply", "")
+            requires_drawing = parse_bool(res_data.get("requires_drawing", False)) or parse_bool(res_data.get("requires_painting", False))
+            drawing_prompt = res_data.get("drawing_prompt", "") or res_data.get("painting_prompt", "")
+            psych_metrics = res_data.get("psych_metrics", {})
+
+            requires_drawing, drawing_prompt = _apply_drawing_heuristics(
+                user_text, text_response, requires_drawing, drawing_prompt,
+                psych_metrics, device_token,
+            )
+
+            logger.info(
+                f"[DOUBAO] Pipeline OK. Transcript: '{user_text}', "
+                f"Reply: '{text_response}', Drawing: {requires_drawing} ({drawing_prompt})"
+            )
+
+            action = None
+            image_url_result = None
+            voice_config = get_device_settings(device_token)
+
+            draw_task = None
+            draw_start = time.time()
+            if requires_drawing and (user_text or drawing_prompt):
+                fusion_input = user_text or drawing_prompt
+                draw_task = asyncio.create_task(
+                    _execute_drawing_with_fusion(fusion_input, device_token, text_response)
+                )
+
+            tts_task = None
+            tts_start = time.time()
+            if text_response:
+                tts_task = asyncio.create_task(
+                    asyncio.to_thread(doubao.generate_speech, text_response, voice_config)
+                )
+
+            if draw_task:
                 try:
-                    print(f"[DEBUG] [CORE] Translating logic to English...")
-                    english_prompt = prompt
-                    if doubao.client:
-                        try:
-                            res_trans = doubao.client.chat.completions.create(
-                                model=doubao.audio_model,
-                                messages=[
-                                    {"role": "system", "content": "You are a professional English translator. Translate the given text to English. Output ONLY the translation without any other text or explanation."},
-                                    {"role": "user", "content": prompt}
-                                ],
-                                timeout=5.0
-                            )
-                            english_prompt = res_trans.choices[0].message.content.strip()
-                            print(f"[DEBUG] [CORE] Translated to English using Doubao: '{english_prompt}'")
-                        except Exception as trans_err:
-                            print(f"[WARNING] [CORE] Doubao translation failed: {trans_err}. Using original prompt.")
-                    else:
-                        print(f"[WARNING] [CORE] Doubao is not configured, using original prompt.")
-                    print(f"[DEBUG] [CORE] English Prompt: '{english_prompt}'")
-                    
-                    result = generate_image_with_fallback(english_prompt)
-                    image_urls = result["urls"]
-                    
-                    if image_urls:
-                        print(f"[DEBUG] [CORE] Image generated, processing for line art...")
-                        processed_image, bitmap_hex = process_line_art_and_bitmap(image_urls[0])
-                        
-                        job_id = str(uuid.uuid4())
-                        job_data = {
-                            "job_id": job_id,
-                            "image_url": processed_image,
-                            "bitmap_hex": bitmap_hex,
-                            "prompt": prompt,
-                            "timestamp": time.time()
-                        }
-                        save_print_job_to_db(job_data)
-                        
-                        action = {"type": "print", "prompt": prompt, "job_id": job_id, "image_url": processed_image, "bitmap_hex": bitmap_hex}
-                        print(f"[DEBUG] [CORE] Drawing job created: {job_id}")
-                        
-                        generation_id = str(uuid.uuid4())
-                        history_entry = {
-                            "generation_id": generation_id,
-                            "prompt": prompt,
-                            "english_prompt": english_prompt,
-                            "engine": "voice/chat",
-                            "protagonist": None,
-                            "title": f"🎨 {prompt}",
-                            "aspect_ratio": "1:1",
-                            "num_images": 1,
-                            "style": "default",
-                            "apply_line_art": True,
-                            "image_urls": [processed_image],
-                            "raw_bitmaps": [bitmap_hex],
-                            "timestamp": time.time()
-                        }
-                        save_history_to_db(history_entry)
-                        
-                        if not text_response:
-                            text_response = f"好的，我这就画一张{prompt}。"
-                    else:
-                        print("[ERROR] [CORE] Image generation returned no URLs.")
-                        text_response = "抱歉，我画不出来这个。"
-                except Exception as e:
-                    print(f"[ERROR] [CORE] Error generating drawing from voice: {e}")
-                    text_response = "抱歉，画画的时候出错了。"
-                    
-        # Backup heuristic for DeepSeek pipeline when no drawing was generated via tool calls
-        if not action:
-            user_text_lower = user_text.lower() if user_text else ""
-            drawing_keywords = ["画画", "画一个", "画只", "画张", "画条", "画一幅", "画一画", "想要画", "帮我画", "可以画", "画个", "画出", "画一画", "画"]
-            
-            should_draw = False
-            if user_text_lower and any(kw in user_text_lower for kw in drawing_keywords):
-                should_draw = True
-            elif check_assistant_drawing_trigger(text_response):
-                should_draw = True
-                
-            if should_draw:
-                from src.conversation_crud import ConversationManager
-                conv_context = ConversationManager.get_conversation_context(device_token)
-                prompt = extract_drawing_subject_advanced(user_text, text_response, conv_context)
-                if not prompt or prompt.strip() == "":
-                    prompt = "可爱的小兔子"
-                
-                print(f"[DEBUG] [CORE] Backup drawing triggered for prompt: '{prompt}'")
+                    action = await draw_task
+                    draw_duration = time.time() - draw_start
+                    if action:
+                        image_url_result = action.get("image_url")
+                        logger.info(f"[DOUBAO] Drawing print job created: {action.get('job_id')}")
+                except Exception as draw_err:
+                    draw_duration = time.time() - draw_start
+                    logger.error(f"[DOUBAO] Fusion drawing failed: {draw_err}")
+
+            audio_base64 = None
+            if tts_task:
                 try:
-                    print(f"[DEBUG] [CORE] Translating logic to English...")
-                    english_prompt = prompt
-                    if doubao.client:
-                        try:
-                            res_trans = doubao.client.chat.completions.create(
-                                model=doubao.audio_model,
-                                messages=[
-                                    {"role": "system", "content": "You are a professional English translator. Translate the given text to English. Output ONLY the translation without any other text or explanation."},
-                                    {"role": "user", "content": prompt}
-                                ],
-                                timeout=5.0
-                            )
-                            english_prompt = res_trans.choices[0].message.content.strip()
-                            print(f"[DEBUG] [CORE] Translated to English using Doubao: '{english_prompt}'")
-                        except Exception as trans_err:
-                            print(f"[WARNING] [CORE] Doubao translation failed: {trans_err}. Using original prompt.")
-                    else:
-                        print(f"[WARNING] [CORE] Doubao is not configured, using original prompt.")
-                    print(f"[DEBUG] [CORE] English Prompt: '{english_prompt}'")
-                    
-                    result = generate_image_with_fallback(english_prompt)
-                    image_urls = result["urls"]
-                    
-                    if image_urls:
-                        print(f"[DEBUG] [CORE] Image generated, processing for line art...")
-                        processed_image, bitmap_hex = process_line_art_and_bitmap(image_urls[0])
-                        
-                        job_id = str(uuid.uuid4())
-                        job_data = {
-                            "job_id": job_id,
-                            "image_url": processed_image,
-                            "bitmap_hex": bitmap_hex,
-                            "prompt": prompt,
-                            "timestamp": time.time()
-                        }
-                        save_print_job_to_db(job_data)
-                        
-                        action = {"type": "print", "prompt": prompt, "job_id": job_id, "image_url": processed_image, "bitmap_hex": bitmap_hex}
-                        print(f"[DEBUG] [CORE] Drawing job created via backup: {job_id}")
-                        
-                        generation_id = str(uuid.uuid4())
-                        history_entry = {
-                            "generation_id": generation_id,
-                            "prompt": prompt,
-                            "english_prompt": english_prompt,
-                            "engine": "voice/chat",
-                            "protagonist": None,
-                            "title": f"🎨 {prompt}",
-                            "aspect_ratio": "1:1",
-                            "num_images": 1,
-                            "style": "default",
-                            "apply_line_art": True,
-                            "image_urls": [processed_image],
-                            "raw_bitmaps": [bitmap_hex],
-                            "timestamp": time.time()
-                        }
-                        save_history_to_db(history_entry)
-                        
-                        if not text_response or text_response == "我没听清，请再说一遍。":
-                            text_response = f"好的，我这就画一张{prompt}。"
-                except Exception as e:
-                    print(f"[ERROR] [CORE] Backup drawing generation failed: {e}")
-                    
-        if not text_response:
-            text_response = "我没听清，请再说一遍。"
-            
-        audio_base64 = None
-        if text_response:
+                    audio_base64 = await tts_task
+                except Exception as tts_err:
+                    logger.error(f"[DOUBAO] Speech gen failed: {tts_err}")
+                tts_duration = time.time() - tts_start
+                logger.info(f"[DOUBAO] TTS took {tts_duration:.2f}s")
+
+            embedding_available = False
+            embed_start = time.time()
             try:
-                voice_config = get_device_settings(device_token)
-                audio_base64 = deepseek.generate_speech(text_response, voice_name=voice_config)
-            except Exception as e:
-                print(f"[ERROR] [CORE] Failed to generate final response speech: {e}")
-                audio_base64 = None
-        
-        total_duration = time.time() - start_time
-        print(f"[DEBUG] [CORE] total processing completed in {total_duration:.2f}s")
-            
-        return_payload = {
-            "text_response": text_response,
-            "action": action,
-            "audio_base64": audio_base64,
-            "embedding_available": False
-        }
-        if user_text:
-            llm_cache.set(user_text, return_payload)
-        return return_payload
-    except Exception as e:
-        print(f"[ERROR] [CORE] LLM Handler Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+                combined_text = f"儿童原句: {user_text}\nAI回复: {text_response}"
+                embedding_vector = doubao.generate_embedding(combined_text)
+                if not embedding_vector or embedding_vector == [0.0] * 1024:
+                    embedding_vector = [0.0] * 1024
+                    embedding_available = False
+                else:
+                    embedding_available = True
+
+                vector_metadata = {
+                    "psych_metrics": psych_metrics,
+                    "drawing_prompt": drawing_prompt if requires_drawing else None,
+                    "drawing_url": image_url_result if image_url_result else None,
+                    "timestamp": time.time(),
+                    "embedding_valid": embedding_available,
+                    "embedding_available": embedding_available,
+                }
+                save_psych_vector(
+                    device_token=device_token,
+                    child_text=user_text,
+                    ai_response=text_response,
+                    embedding=embedding_vector,
+                    metadata=vector_metadata,
+                )
+            except Exception as vector_err:
+                logger.error(f"[DOUBAO_VECTOR] Embedding/Vector DB write failed: {vector_err}")
+                embedding_available = False
+            embed_duration = time.time() - embed_start
+
+            total_duration = time.time() - start_time
+            logger.info(
+                f"\n=================== PERFORMANCE METRICS SUMMARY ===================\n"
+                f"  [ASR / STT]      : {stt_duration:.2f}s\n"
+                f"  [LLM / DIALOG]   : {llm_duration:.2f}s\n"
+                f"  [DRAW / IMAGE]   : {draw_duration:.2f}s\n"
+                f"  [EMBED / VECTOR] : {embed_duration:.2f}s\n"
+                f"  [TTS / AUDIO]    : {tts_duration:.2f}s\n"
+                f"  [TOTAL REQUEST]  : {total_duration:.2f}s\n"
+                f"==================================================================="
+            )
+
+            return_payload = {
+                "text_response": text_response,
+                "action": action,
+                "audio_base64": audio_base64,
+                "stt_empty": False if user_text else True,
+                "embedding_available": embedding_available,
+            }
+            if user_text:
+                llm_cache.set(user_text, return_payload)
+            return return_payload
+
+    except Exception as pipeline_err:
+        logger.error(f"[DOUBAO] Pipeline failed: {pipeline_err}")
+        raise HTTPException(status_code=500, detail=f"Voice/chat processing failed: {pipeline_err}")

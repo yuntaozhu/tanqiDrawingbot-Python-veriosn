@@ -8,9 +8,9 @@ from fastapi.responses import StreamingResponse
 from typing import Optional
 from urllib.parse import unquote
 from src.schemas import ChatRequest, TTSRequest
-from src.config import DEEPSEEK_API_KEY, VOLC_REALTIME_API_KEY
+from src.config import ARK_API_KEY, VOLC_REALTIME_API_KEY
 from src.crud import get_print_jobs_from_db, delete_print_job_from_db, save_print_job_to_db
-from src.services import VoiceInteractionService, DeepSeekAPI
+from src.services import VoiceInteractionService, DoubaoAPI
 from src.business_logic import (
     process_llm_interaction, stream_chat_llm, async_generate_drawing, extract_drawing_subject, async_generate_drawing_with_fusion
 )
@@ -55,7 +55,7 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
 
     # If stream parameter is explicitly false or Accept header is JSON-only
     if stream is False or ("application/json" in accept_header and "text/event-stream" not in accept_header):
-        res = await process_llm_interaction(req.text, DEEPSEEK_API_KEY, device_token=token)
+        res = await process_llm_interaction(req.text, device_token=token)
         return res
 
     user_text = req.text.strip() if req.text else ""
@@ -225,10 +225,10 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
         # the client can play it back immediately.
         if ai_response_text.strip():
             try:
-                deepseek = DeepSeekAPI.get_instance()
+                doubao = DoubaoAPI.get_instance()
                 voice_config = "一个极其温柔、友好、可爱的5岁小朋友，用稚嫩温和的语气说话"
                 audio_bytes = await asyncio.to_thread(
-                    deepseek.generate_speech_bytes, ai_response_text, voice_config
+                    doubao.generate_speech_bytes, ai_response_text, voice_config
                 )
 
                 if audio_bytes:
@@ -339,9 +339,9 @@ async def handle_voice(request: Request):
         logger.warning("[CONN] Unauthorized voice attempt: missing x-device-token")
         raise HTTPException(status_code=401, detail="Unauthorized")
         
-    if not DEEPSEEK_API_KEY:
-        logger.error("[VOICE] Internal Server Error: API key missing")
-        raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY or API_KEY is missing")
+    if not ARK_API_KEY:
+        logger.error("[VOICE] Internal Server Error: ARK_API_KEY missing")
+        raise HTTPException(status_code=500, detail="ARK_API_KEY is missing")
         
     voice_service = VoiceInteractionService.get_instance()
     voice_service.clear_buffer(token)
@@ -359,7 +359,7 @@ async def handle_voice(request: Request):
             logger.warning("[VOICE] Bad Request: empty or extremely small body")
             raise HTTPException(status_code=400, detail="Empty audio body received")
             
-        res = await process_llm_interaction(audio_bytes, DEEPSEEK_API_KEY, device_token=token)
+        res = await process_llm_interaction(audio_bytes, device_token=token)
         logger.debug(f"[VOICE] Response generated: {res.get('text_response')[:50]}...")
         return res
     except Exception as e:
@@ -420,7 +420,7 @@ async def tts_post_endpoint(req: TTSRequest, request: Request):
     if not text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
     
-    deepseek = DeepSeekAPI.get_instance()
+    doubao = DoubaoAPI.get_instance()
     
     voice_config = req.voice
     if req.voice == "child_friendly" or not req.voice or req.voice == "default":
@@ -429,7 +429,7 @@ async def tts_post_endpoint(req: TTSRequest, request: Request):
         voice_config = "一位温柔、知性、亲切的幼儿园女老师"
         
     try:
-        audio_bytes = deepseek.generate_speech_bytes(text, voice_name=voice_config)
+        audio_bytes = doubao.generate_speech_bytes(text, voice_name=voice_config)
         if not audio_bytes:
             raise HTTPException(status_code=500, detail="TTS generation returned empty audio")
 
@@ -470,7 +470,7 @@ async def tts_get_endpoint(
     if len(decoded_text) > 150:
         decoded_text = decoded_text[:150]
         
-    deepseek = DeepSeekAPI.get_instance()
+    doubao = DoubaoAPI.get_instance()
     
     voice_config = voice
     if voice == "child_friendly" or not voice or voice == "default":
@@ -479,7 +479,7 @@ async def tts_get_endpoint(
         voice_config = "一位温柔、知性、亲切的幼儿园女老师"
 
     try:
-        audio_bytes = deepseek.generate_speech_bytes(decoded_text, voice_name=voice_config)
+        audio_bytes = doubao.generate_speech_bytes(decoded_text, voice_name=voice_config)
         if not audio_bytes:
             raise HTTPException(status_code=500, detail="TTS GET Error: returned empty audio")
 
