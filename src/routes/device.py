@@ -27,6 +27,7 @@ from src.logger import setup_logger
 from src.conversation_crud import ConversationManager
 from src.operation_recognizer import OperationRecognizer
 from src.prompt_fusion import PromptFusionEngine, ConversationContextManager
+from src.utils import is_silent_wav_audio
 
 logger = setup_logger("routes.device")
 router = APIRouter()
@@ -369,7 +370,14 @@ async def handle_voice(request: Request):
         if not audio_bytes or len(audio_bytes) < 10:
             logger.warning("[VOICE] Bad Request: empty or extremely small body")
             raise HTTPException(status_code=400, detail="Empty audio body received")
-            
+
+        if is_silent_wav_audio(audio_bytes):
+            logger.info("[VOICE] Rejected silent WAV from token=%s", token[:5] + "***")
+            raise HTTPException(
+                status_code=422,
+                detail="No audible speech detected. Please record again closer to the microphone.",
+            )
+
         res = await process_llm_interaction(audio_bytes, device_token=token)
         logger.debug(f"[VOICE] Response generated: {res.get('text_response')[:50]}...")
         return res

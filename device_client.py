@@ -2,6 +2,9 @@ import os
 import sys
 import logging
 import requests
+import wave
+import audioop
+import threading
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -36,6 +39,7 @@ session = create_session()
 
 # Soft-pause ready-drawing polls while a voice request is waiting on the server
 _voice_busy = False
+_voice_request_lock = threading.Lock()
 
 def log(msg, level="INFO"):
     if level == "DEBUG":
@@ -210,6 +214,41 @@ def record_audio_auto_vad(filename="voice_input.wav", fs=16000, silence_timeout=
     audio_np = np.concatenate(state["chunks"], axis=0)
     write_wav(filename, fs, audio_np)
     return filename
+
+
+def validate_voice_wav(filepath, min_duration_seconds=0.25, min_peak=250):
+    """Reject silent, clipped, or non-16 kHz mono recordings before upload."""
+    try:
+        with wave.open(filepath, "rb") as wav:
+            sample_rate = wav.getframerate()
+            channels = wav.getnchannels()
+            sample_width = wav.getsampwidth()
+            frame_count = wav.getnframes()
+            audio_frames = wav.readframes(frame_count)
+
+        duration = frame_count / float(sample_rate) if sample_rate else 0.0
+        if sample_rate != 16000 or channels != 1 or sample_width != 2:
+            log(
+                f"录音格式不正确：需要 16 kHz 单声道 16-bit WAV，实际为 "
+                f"{sample_rate} Hz / {channels} 声道 / {sample_width * 8}-bit",
+                "ERROR",
+            )
+            return False
+        if duration < min_duration_seconds:
+            log(f"录音太短（{duration:.2f}s），请说完后再发送。", "WARNING")
+            return False
+
+        peak = audioop.max(audio_frames, sample_width)
+        if peak < min_peak:
+            log("没有检测到可用的人声，请靠近麦克风后重试。", "WARNING")
+            return False
+        if peak >= 32760:
+            log("录音发生削波，请降低麦克风音量或稍微远离麦克风后重试。", "WARNING")
+            return False
+        return True
+    except (OSError, wave.Error, audioop.error) as error:
+        log(f"无法读取 WAV 录音：{error}", "ERROR")
+        return False
 
 # -----------------------------------------------------------------------------
 # Configuration & Dynamic Overrides
@@ -697,6 +736,9 @@ def send_voice_file(filepath, silent=False):
     url = f"{BASE_URL}/api/device/v1/voice"
     
     try:
+        if not validate_voice_wav(filepath):
+            return None
+
         with open(filepath, "rb") as f:
             audio_data = f.read()
             
@@ -704,14 +746,19 @@ def send_voice_file(filepath, silent=False):
             log(f"Sending audio file: {filepath} ({len(audio_data)} bytes)", "DEBUG")
         
         headers = get_headers('audio/wav')
-        _voice_busy = True
+        if not _voice_request_lock.acquire(blocking=False):
+            log("上一段语音仍在处理，请等待老师回复后再说。", "WARNING")
+            return None
         try:
-            # Voice pipeline (STT+LLM+TTS) often needs 20–45s; avoid client ReadTimeout
+            _voice_busy = True
+            # Voice pipeline (STT+LLM+TTS) can need tens of seconds, but only
+            # one request is permitted at a time to avoid transcript mixing.
             res = session.post(
                 url, data=audio_data, headers=headers, allow_redirects=False, timeout=60
             )
         finally:
             _voice_busy = False
+            _voice_request_lock.release()
         
         if res.status_code == 200:
             try:

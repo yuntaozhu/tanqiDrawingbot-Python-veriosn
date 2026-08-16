@@ -10,14 +10,14 @@
 
 | 环境变量名称 | 配置的值 / 默认值 | 主要用途 | 对应使用的模型 / 接口 |
 | :--- | :--- | :--- | :--- |
-| **`ARK_API_KEY`** | `05a5b825-69f6-40ff-93e9-7493c05e4fb0` | 火山引擎豆包大模型授权凭证 | 豆包全系列多模态大模型授权 |
+| **`ARK_API_KEY`** | 在部署环境中设置（不记录真实值） | 火山引擎豆包大模型授权凭证 | 豆包全系列多模态大模型授权 |
 | **`ARK_AUDIO_MODEL`** | `doubao-seed-2-0-lite-260428` | 火山引擎端到端音频大模型，用于一键完成语音听写、心理特征提取与回复决策 | `doubao-seed-2-0-lite-260428` |
 | **`ARK_DRAW_MODEL`** | `doubao-seedream-5-0-pro-260628` | 最新高精度 Seedream 5.0 pro 绘画创作引擎，专为儿童黑白简笔画定制 | `doubao-seedream-5-0-pro-260628` |
-| **`DEEPSEEK_API_KEY`** | `sk-b14e64f9...` | 备用大语言模型、中文文本理解及成长报告自动撰写 | `deepseek-chat` |
-| **`STT_API_KEY`** | `sk-xuxelxax...` (SiliconFlow 硅基流动) | 备用语音转文字 (STT) 识别引擎 | `FunAudioLLM/SenseVoiceSmall` |
-| **`TTS_API_KEY`** | `sk-xuxelxax...` (SiliconFlow 硅基流动) | 备用语音合成 (TTS) 外放引擎 | `tts-1` (Alloy 声音) |
-| **`REPLICATE_API_TOKEN`** | `r8_6wC8A7F...` | 备用简笔画生成，大模型自动翻译 | `bytedance/seedream-4` |
-| **`IDEOGRAM_API_KEY`** | `gB9nFQE-sK...` | 备用高分辨率简笔画生成，极速模式 | `ideogram-v3` (FLASH) |
+| **`DEEPSEEK_API_KEY`** | 在部署环境中设置（不记录真实值） | 备用大语言模型、中文文本理解及成长报告自动撰写 | `deepseek-chat` |
+| **`STT_API_KEY`** | 在部署环境中设置（不记录真实值） | 备用语音转文字 (STT) 识别引擎 | `FunAudioLLM/SenseVoiceSmall` |
+| **`TTS_API_KEY`** | 在部署环境中设置（不记录真实值） | 备用语音合成 (TTS) 外放引擎 | `tts-1` (Alloy 声音) |
+| **`REPLICATE_API_TOKEN`** | 在部署环境中设置（不记录真实值） | 备用简笔画生成，大模型自动翻译 | `bytedance/seedream-4` |
+| **`IDEOGRAM_API_KEY`** | 在部署环境中设置（不记录真实值） | 备用高分辨率简笔画生成 | `ideogram-v4` (`DEFAULT`) |
 
 ---
 

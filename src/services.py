@@ -543,7 +543,6 @@ class DoubaoAPI:
         cache_mgr.set(child_prompt, local_exp)
         return local_exp
 
-    @retry_with_backoff(max_retries=2)
     def generate_image(self, prompt: str, aspect_ratio: str = "1:1", num_images: int = 1) -> Optional[List[str]]:
         if not self.client:
             raise ValueError("ARK_API_KEY is not set.")
@@ -559,25 +558,45 @@ class DoubaoAPI:
             f"CRITICAL: NO REALISTIC SHADING, NO GRADIENTS, NO GREYSCALE, NO TEXT, NO ENGLISH WORDS."
         )
         
-        print(f"[DEBUG] [DOUBAO_DRAW] Generating prompt: '{optimized_prompt}'")
-        try:
-            response = self.client.images.generate(
+        def request_image(image_prompt: str):
+            return self.client.images.generate(
                 model=self.draw_model,
-                prompt=optimized_prompt,
+                prompt=image_prompt,
                 size="1.5K",  # 1.5K is supported, and is more creative and price-effective than 1K
                 response_format="url",
-                extra_body={
-                    "optimize_prompt_options": {
-                        "mode": "fast"  # fast mode is highly optimized for ultra low latency / high speed
-                    }
-                },
-                timeout=45
+                extra_body={"optimize_prompt_options": {"mode": "fast"}},
+                timeout=45,
             )
+
+        print(f"[DEBUG] [DOUBAO_DRAW] Generating prompt: '{optimized_prompt}'")
+        try:
+            response = request_image(optimized_prompt)
             urls = [item.url for item in response.data]
             print(f"[DEBUG] [DOUBAO_DRAW] Success! Generated URL: {urls[0] if urls else 'None'}")
             return urls
         except Exception as e:
             print(f"[ERROR] [DOUBAO_DRAW] Error generating image: {e}")
+            policy_error = any(
+                marker in str(e).lower()
+                for marker in ("policyviolation", "policy violation", "copyright", "content_policy")
+            )
+            if policy_error:
+                # Retry once with a shorter, generic children's line-art prompt.
+                # The original error is preserved if this attempt also fails so
+                # the fallback chain can select Ideogram or Replicate.
+                softened_prompt = (
+                    f"儿童涂色本黑白线稿，主题：{prompt}。"
+                    "简单友好的卡通轮廓，纯白背景，无文字，无标志，无阴影。"
+                )
+                print("[WARNING] [DOUBAO_DRAW] Policy rejection; retrying once with softened prompt.")
+                try:
+                    response = request_image(softened_prompt)
+                    urls = [item.url for item in response.data]
+                    if urls:
+                        print(f"[DEBUG] [DOUBAO_DRAW] Softened prompt succeeded: {urls[0]}")
+                        return urls
+                except Exception as retry_error:
+                    print(f"[WARNING] [DOUBAO_DRAW] Softened prompt failed: {retry_error}")
             raise RuntimeError(f"Doubao Seedream 5.0 pro API Error: {e}")
 
     def generate_embedding(self, text: str) -> Optional[List[float]]:
@@ -886,13 +905,12 @@ class IdeogramAPI:
         self.api_key = IDEOGRAM_API_KEY
         self.base_url = "https://api.ideogram.ai/v1"
 
-    @retry_with_backoff(max_retries=3)
+    @retry_with_backoff(max_retries=1)
     def generate_image(self, prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1, style: str = "default") -> Optional[List[str]]:
         if not self.api_key:
             return None
-            
+
         char_context = f"Main character: {protagonist}. " if protagonist else ""
-        
         style_prompts = {
             "cartoon": "Line art artistic cartoon work, black and white, coloring book style.",
             "realistic": "Realistic sketch, highly detailed line art, black and white, pencil sketch style.",
@@ -900,60 +918,37 @@ class IdeogramAPI:
             "default": "Simple black and white line art, 1-bit color style, binary image."
         }
         style_keywords = style_prompts.get(style.lower(), style_prompts["default"])
-        
-        constraints = "CRITICAL: NO TEXT, NO ENGLISH WORDS, white background."
-        full_prompt = f"{style_keywords} {char_context} Scenario: {prompt}. {constraints}"
-        
-        url = f"{self.base_url}/ideogram-v3/generate"
-        headers = {
-            "Api-Key": self.api_key
+
+        constraints = "Pure white background. No text, letters, logos, shading, gradients, or gray tones."
+        full_prompt = f"{style_keywords} {char_context}Scenario: {prompt}. {constraints}"
+        url = f"{self.base_url}/ideogram-v4/generate"
+
+        resolution_by_aspect_ratio = {
+            "1:1": "2048x2048",
+            "16:9": "2304x1296",
+            "9:16": "1296x2304",
+            "4:3": "2304x1728",
+            "3:4": "1728x2304",
         }
-        
-        ideo_aspect_ratio = f"ASPECT_{aspect_ratio.replace(':', '_')}" if ":" in aspect_ratio else "ASPECT_1_1"
-        
-        files = {}
-        data = {
-            "prompt": full_prompt,
-            "aspect_ratio": ideo_aspect_ratio,
-            "rendering_speed": "FLASH",
-            "style_type": "AUTO",
-            "magic_prompt": "ON",
-            "num_images": str(num_images)
-        }
-        if seed is not None:
-            data["seed"] = str(seed)
-            
+        resolution = resolution_by_aspect_ratio.get(aspect_ratio, "2048x2048")
+
         if ref_image:
-            try:
-                if ref_image.startswith("data:image"):
-                    header, encoded = ref_image.split(",", 1)
-                    img_data = base64.b64decode(encoded)
-                    files["style_reference_images"] = ("reference.png", img_data, "image/png")
-                else:
-                    res = requests.get(ref_image, timeout=10)
-                    files["style_reference_images"] = ("reference.png", res.content, "image/png")
-            except Exception as e:
-                print(f"Failed to attach reference image: {e}")
-                
-        if files:
-            response = requests.post(url, headers=headers, data=data, files=files, timeout=15)
-        else:
-            headers["Content-Type"] = "application/json"
-            json_data = {
-                "image_request": {
-                    "prompt": full_prompt,
-                    "aspect_ratio": ideo_aspect_ratio,
-                    "rendering_speed": "FLASH",
-                    "style_type": "AUTO",
-                    "magic_prompt": "ON",
-                    "num_images": num_images
-                }
-            }
-            if seed is not None:
-                json_data["image_request"]["seed"] = seed
-                
-            response = requests.post(url, headers=headers, json=json_data, timeout=15)
-            
+            print("[WARNING] [IDEOGRAM] V4 text generation does not use style references; ignoring ref_image.")
+
+        # V4 requires multipart/form-data even for text-only generation. Using
+        # `(None, value)` parts makes requests encode scalar fields as multipart.
+        multipart_fields = [
+            ("text_prompt", (None, full_prompt)),
+            ("resolution", (None, resolution)),
+            ("rendering_speed", (None, "DEFAULT")),
+        ]
+        response = requests.post(
+            url,
+            headers={"Api-Key": self.api_key},
+            files=multipart_fields,
+            timeout=45,
+        )
+
         if response.status_code == 200:
             result = response.json()
             if result.get("data") and len(result["data"]) > 0:
@@ -998,40 +993,63 @@ def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protag
             "metadata": entry.get("metadata", [None] * len(entry.get("urls", [])))
         }
 
-    doubao_api = DoubaoAPI.get_instance()
+    engines = ["doubao", "ideogram", "replicate"]
+    if preferred_engine in engines:
+        engines.remove(preferred_engine)
+        engines.insert(0, preferred_engine)
 
-    if not doubao_api.client:
-        print("Doubao API not configured (ARK_API_KEY missing).")
-        return {"urls": None, "metadata": None, "error": "Doubao API not configured"}
+    errors = []
+    for engine in engines:
+        try:
+            print(f"Attempting to generate image using: {engine}")
+            if engine == "doubao":
+                provider = DoubaoAPI.get_instance()
+                if not provider.client:
+                    raise RuntimeError("ARK_API_KEY is not configured")
+                image_urls = provider.generate_image(prompt, aspect_ratio, num_images)
+            elif engine == "ideogram":
+                provider = IdeogramAPI.get_instance()
+                if not provider.api_key:
+                    raise RuntimeError("IDEOGRAM_API_KEY is not configured")
+                image_urls = provider.generate_image(
+                    prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style
+                )
+            else:
+                provider = ReplicateAPI.get_instance()
+                if not provider.api_key:
+                    raise RuntimeError("REPLICATE_API_TOKEN is not configured")
+                image_urls = provider.generate_image(
+                    prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style
+                )
 
-    print("Attempting to generate image using: doubao")
-    try:
-        image_urls = doubao_api.generate_image(prompt, aspect_ratio, num_images)
-        if image_urls:
-            print("Successfully generated image using: doubao")
+            if not image_urls:
+                raise RuntimeError("provider returned no images")
 
             metadata = []
-            for url in image_urls:
+            for image_url in image_urls:
                 try:
-                    metadata.append(get_image_metadata(url))
-                except Exception as me:
-                    print(f"Failed to fetch metadata for {url}: {me}")
+                    # Ideogram URLs are ephemeral, so inspect/download them
+                    # immediately before returning to the caller for processing.
+                    metadata.append(get_image_metadata(image_url))
+                except Exception as metadata_error:
+                    print(f"Failed to fetch {engine} image metadata: {metadata_error}")
                     metadata.append(None)
 
             IMAGE_CACHE[cache_key] = {
                 "urls": image_urls,
                 "metadata": metadata,
                 "timestamp": time.time(),
-                "engine": "doubao"
+                "engine": engine,
             }
             save_cache(CACHE_FILE, IMAGE_CACHE)
-            return {"urls": image_urls, "metadata": metadata}
-        else:
-            print("Engine doubao returned no images.")
-            return {"urls": None, "metadata": None}
-    except Exception as e:
-        print(f"Doubao image generation failed: {e}")
-        return {"urls": None, "metadata": None}
+            print(f"Successfully generated image using: {engine}")
+            return {"urls": image_urls, "metadata": metadata, "engine": engine}
+        except Exception as error:
+            message = f"{engine}: {error}"
+            errors.append(message)
+            print(f"[WARNING] Image generation failed ({message}); trying next provider.")
+
+    return {"urls": None, "metadata": None, "error": "; ".join(errors)}
 
 
 class VoiceInteractionService:

@@ -60,6 +60,28 @@ def retry_with_backoff(max_retries=3, initial_delay=1, backoff_factor=2, jitter=
         return wrapper
     return decorator
 
+
+def is_silent_wav_audio(audio_bytes: bytes, peak_threshold: float = 0.01) -> bool:
+    """Return True only for parseable WAV input whose peak level is effectively silent."""
+    try:
+        sample_rate, samples = wavfile.read(io.BytesIO(audio_bytes))
+        if sample_rate <= 0 or not getattr(samples, "size", 0):
+            return True
+
+        samples = np.asarray(samples)
+        if np.issubdtype(samples.dtype, np.integer):
+            scale = float(np.iinfo(samples.dtype).max)
+            peak = float(np.max(np.abs(samples.astype(np.float64)))) / scale
+        else:
+            peak = float(np.max(np.abs(samples.astype(np.float64))))
+
+        return peak < peak_threshold
+    except Exception:
+        # Keep non-WAV or malformed audio on the provider path, which can return
+        # a useful format-specific error instead of silently rejecting it here.
+        return False
+
+
 @retry_with_backoff(max_retries=3)
 def load_image(image_url: str) -> Image.Image:
     if image_url.startswith("data:image"):

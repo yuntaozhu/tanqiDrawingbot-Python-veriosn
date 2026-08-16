@@ -341,16 +341,6 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
 
     def _generate_sync():
         try:
-            doubao = DoubaoAPI.get_instance()
-            if doubao.client:
-                try:
-                    urls = doubao.generate_image(subject)
-                    if urls:
-                        processed_image, bitmap_hex = process_line_art_and_bitmap(urls[0])
-                        return processed_image, bitmap_hex, subject
-                except Exception as e:
-                    print(f"[WARNING] [ASYNC_DRAW] Doubao draw failed: {e}")
-
             result = generate_image_with_fallback(subject)
             urls = result.get("urls")
             if urls:
@@ -451,16 +441,6 @@ async def async_generate_drawing_with_fusion(
 
     def _generate_sync():
         try:
-            doubao = DoubaoAPI.get_instance()
-            if doubao.client:
-                try:
-                    urls = doubao.generate_image(fused_prompt)
-                    if urls:
-                        processed_image, bitmap_hex = process_line_art_and_bitmap(urls[0])
-                        return processed_image, bitmap_hex
-                except Exception as e:
-                    print(f"[WARNING] [ASYNC_DRAW] Doubao Seedream image generation failed: {e}")
-
             result = generate_image_with_fallback(fused_prompt)
             urls = result.get("urls")
             if urls:
@@ -607,6 +587,24 @@ def _empty_audio_response() -> Dict[str, Any]:
             "detected_emotions": ["困惑"],
             "linguistic_richness_score": 0.0,
             "cognitive_milestone_ref": "无",
+            "attention_span_seconds": 15,
+            "key_interests": [],
+            "requires_attention": False,
+        },
+    }
+
+
+def _dialog_unavailable_response(user_text: str) -> Dict[str, Any]:
+    """Keep recognized speech usable when the dialog model is temporarily unavailable."""
+    return {
+        "user_transcript": user_text,
+        "assistant_reply": "我听到你说的话啦，不过网络有点慢。我们先继续玩，马上再和你聊！",
+        "requires_drawing": False,
+        "drawing_prompt": "",
+        "psych_metrics": {
+            "detected_emotions": [],
+            "linguistic_richness_score": 0.0,
+            "cognitive_milestone_ref": "暂未分析",
             "attention_span_seconds": 15,
             "key_interests": [],
             "requires_attention": False,
@@ -841,7 +839,14 @@ async def _resolve_doubao_dialog(
             llm_duration = time.time() - llm_start
 
         if not res_data:
-            res_data = _empty_audio_response()
+            # An empty transcript is a microphone/STT problem; a non-empty
+            # transcript with no LLM result is a transient network problem.
+            # Do not erase the child's recognized drawing request in the latter.
+            res_data = (
+                _dialog_unavailable_response(user_text)
+                if user_text
+                else _empty_audio_response()
+            )
     else:
         llm_start = time.time()
         try:
@@ -851,6 +856,8 @@ async def _resolve_doubao_dialog(
         except Exception as text_err:
             logger.warning(f"[DOUBAO] unified_text_chat failed: {text_err}")
         llm_duration = time.time() - llm_start
+        if not res_data:
+            res_data = _dialog_unavailable_response(str(prompt_input or ""))
 
     return res_data, stt_duration, llm_duration
 
