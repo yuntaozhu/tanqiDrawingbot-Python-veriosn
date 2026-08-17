@@ -13,7 +13,8 @@ from src.config import ARK_API_KEY, ADMIN_KEY
 from src.cache import DrawingCacheManager, LLMCacheManager
 from src.crud import (
     save_history_to_db, save_print_job_to_db, save_psych_vector, 
-    query_psych_vectors, get_device_settings
+    query_psych_vectors, get_device_settings,
+    get_ready_drawings_from_db, queue_print_job, allocate_scroll_seq,
 )
 from src.utils import (
     process_line_art_image, get_raw_bitmap_hex, get_embedded_bitmap, get_image_metadata,
@@ -222,6 +223,42 @@ def _is_short_affirmation(user_text: str) -> bool:
     return False
 
 
+EXPLICIT_DRAW_KEYWORDS = [
+    "画画", "画一个", "画一只", "画一条", "画只", "画张", "画条", "画一幅", "画一画",
+    "想要画", "帮我画", "可以画", "画个", "画出", "想画",
+    "画出来", "画出来吧", "再画", "画小猫", "画小狗", "画小兔", "画小鱼",
+    "画只小", "画条鱼", "画鱼", "一条小鱼",
+]
+
+
+def _has_explicit_draw_intent(user_text: str) -> bool:
+    if not user_text:
+        return False
+    return any(kw in user_text for kw in EXPLICIT_DRAW_KEYWORDS)
+
+
+def _is_print_intent(user_text: str) -> bool:
+    """Voice/text confirmation to print the latest ready drawing. Not a new draw."""
+    if not user_text:
+        return False
+    trimmed = user_text.strip("。，！？.!? ～~、 ")
+    if any(n in trimmed for n in ("不要打印", "别打印", "先不打印", "不用打印")):
+        return False
+    if "画" in trimmed and "打印" in trimmed:
+        return False
+    exact = {
+        "打印", "打印出来", "打印吧", "打印呀", "打印啊", "帮我打印", "打印这张",
+        "请打印", "出纸", "打出来", "印出来", "印一下", "我要打印",
+    }
+    if trimmed in exact:
+        return True
+    if any(k in trimmed for k in ("打印出来", "帮我打印", "打印这张", "打印一下")):
+        return True
+    if trimmed.endswith("打印") and len(trimmed) <= 8:
+        return True
+    return False
+
+
 def extract_drawing_subject(text: str, conversation_context: Optional[Dict] = None) -> str:
     if not text:
         return ""
@@ -394,7 +431,10 @@ async def async_generate_drawing(subject: str, device_token: str = None) -> Opti
 async def async_generate_drawing_with_fusion(
     fused_prompt: str, 
     device_token: str, 
-    fusion_result: Dict[str, Any]
+    fusion_result: Dict[str, Any],
+    seed: Optional[int] = None,
+    scroll_id: Optional[str] = None,
+    seq: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Generates drawing line art asynchronously using fused_prompt and persists history.
@@ -402,11 +442,17 @@ async def async_generate_drawing_with_fusion(
     print(f"[DEBUG] [ASYNC_DRAW] Using fused prompt: {fused_prompt[:100]}...")
     print(f"[DRAWING] Final prompt: {fused_prompt}")
     start_time = time.time()
+
+    if not scroll_id or seed is None:
+        meta = _scroll_meta_for_device(device_token)
+        scroll_id = scroll_id or meta["scroll_id"]
+        seed = seed if seed is not None else meta["seed"]
+        seq = seq if seq is not None else meta["seq"]
     
     cache_mgr = DrawingCacheManager.get_instance()
     operation = (fusion_result or {}).get("operation") or "create"
-    use_cache = operation == "create"
-    cached = cache_mgr.get(fused_prompt) if use_cache else None
+    use_drawing_cache = operation == "create" and seed is None
+    cached = cache_mgr.get(fused_prompt) if use_drawing_cache else None
     if cached:
         print(f"[DEBUG] [ASYNC_DRAW] Cache Hit for fused prompt: '{fused_prompt}'")
         job_id = str(uuid.uuid4())
@@ -417,7 +463,10 @@ async def async_generate_drawing_with_fusion(
             "image_url": cached.get("image_url"),
             "bitmap_hex": cached.get("bitmap_hex"),
             "prompt": fusion_result.get("target_element") or fused_prompt,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "scroll_id": scroll_id,
+            "seed": seed,
+            "seq": seq,
         })
         
         from src.conversation_crud import ConversationManager
@@ -438,12 +487,17 @@ async def async_generate_drawing_with_fusion(
             "scene_elements": fusion_result.get("all_elements_after"),
             "job_id": job_id,
             "image_url": cached.get("image_url"),
-            "bitmap_hex": cached.get("bitmap_hex")
+            "bitmap_hex": cached.get("bitmap_hex"),
+            "scroll_id": scroll_id,
+            "seed": seed,
+            "seq": seq,
         }
 
     def _generate_sync():
         try:
-            result = generate_image_with_fallback(fused_prompt, skip_cache=not use_cache)
+            result = generate_image_with_fallback(
+                fused_prompt, seed=seed, skip_cache=operation != "create"
+            )
             urls = result.get("urls")
             if urls:
                 processed_image, bitmap_hex = process_line_art_and_bitmap(urls[0])
@@ -473,7 +527,10 @@ async def async_generate_drawing_with_fusion(
                 "image_url": processed_image,
                 "bitmap_hex": bitmap_hex,
                 "prompt": fusion_result.get("target_element") or fused_prompt,
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "scroll_id": scroll_id,
+                "seed": seed,
+                "seq": seq,
             })
         except Exception as db_err:
             logger.error(f"[ASYNC_DRAW] Failed to save PrintJob: {db_err}")
@@ -499,14 +556,17 @@ async def async_generate_drawing_with_fusion(
             "scene_elements": fusion_result.get("all_elements_after"),
             "job_id": job_id,
             "image_url": processed_image,
-            "bitmap_hex": bitmap_hex
+            "bitmap_hex": bitmap_hex,
+            "scroll_id": scroll_id,
+            "seed": seed,
+            "seq": seq,
         }
 
-        if use_cache:
+        if use_drawing_cache:
             cache_mgr.set(fused_prompt, action)
 
         duration = time.time() - start_time
-        print(f"[DEBUG] [ASYNC_DRAW] Image generated with fusion in {duration:.2f}s, job_id: {job_id}, op={operation}, cached={use_cache}")
+        print(f"[DEBUG] [ASYNC_DRAW] Image generated with fusion in {duration:.2f}s, job_id: {job_id}, op={operation}, cached={use_drawing_cache}")
         return action
     else:
         logger.error(f"[ASYNC_DRAW] ❌ Image generation failed or returned empty result")
@@ -577,6 +637,8 @@ def _default_conversation_context(device_token: str) -> Dict[str, Any]:
         "last_generated_prompt": None,
         "last_operation_type": None,
         "last_operation_detail": {},
+        "current_scroll_id": None,
+        "current_seed": None,
     }
 
 
@@ -599,11 +661,16 @@ def _empty_audio_response() -> Dict[str, Any]:
 
 def _dialog_unavailable_response(user_text: str) -> Dict[str, Any]:
     """Keep recognized speech usable when the dialog model is temporarily unavailable."""
+    wants_draw = _has_explicit_draw_intent(user_text)
+    if wants_draw:
+        reply = "好呀，我马上画给你！画好了你看屏幕，想打印就说打印。"
+    else:
+        reply = "我听到你说的话啦。我们先继续玩，马上再和你聊！"
     return {
         "user_transcript": user_text,
-        "assistant_reply": "我听到你说的话啦，不过网络有点慢。我们先继续玩，马上再和你聊！",
-        "requires_drawing": False,
-        "drawing_prompt": "",
+        "assistant_reply": reply,
+        "requires_drawing": wants_draw,
+        "drawing_prompt": user_text if wants_draw else "",
         "psych_metrics": {
             "detected_emotions": [],
             "linguistic_richness_score": 0.0,
@@ -632,12 +699,7 @@ def _apply_drawing_heuristics(
         return False, ""
 
     # Explicit draw phrases only (no bare "画" alone matching greetings)
-    explicit_draw_keywords = [
-        "画画", "画一个", "画一只", "画只", "画张", "画条", "画一幅", "画一画",
-        "想要画", "帮我画", "可以画", "画个", "画出", "想画",
-        "画出来", "画出来吧", "再画", "画小猫", "画小狗", "画小兔", "画只小"
-    ]
-    if not requires_drawing and any(kw in user_text for kw in explicit_draw_keywords):
+    if not requires_drawing and _has_explicit_draw_intent(user_text):
         logger.debug(f"[HEURISTIC] Explicit draw intent from user: '{user_text}'")
         requires_drawing = True
 
@@ -694,10 +756,134 @@ def _apply_drawing_heuristics(
 # One Seedream job at a time (single Railway worker — concurrent draws starve voice LLM)
 _DRAWING_SEMAPHORE = asyncio.Semaphore(1)
 _active_drawing_devices: set = set()
+_pending_drawings: Dict[str, list] = {}
+_drawing_workers: set = set()
+_drawing_meta_lock = asyncio.Lock()
 
 
 def is_device_drawing(device_token: str) -> bool:
-    return bool(device_token) and device_token in _active_drawing_devices
+    if not device_token:
+        return False
+    if device_token in _drawing_workers or device_token in _active_drawing_devices:
+        return True
+    return bool(_pending_drawings.get(device_token))
+
+
+def _scroll_meta_for_device(device_token: str) -> Dict[str, Any]:
+    scroll_id, seed = ConversationManager.ensure_scroll(device_token)
+    seq = allocate_scroll_seq(scroll_id)
+    return {"scroll_id": scroll_id, "seed": seed, "seq": seq}
+
+
+def _handle_voice_print(device_token: str) -> Dict[str, Any]:
+    jobs = get_ready_drawings_from_db(device_token)
+    if not jobs:
+        if is_device_drawing(device_token):
+            return {
+                "type": "print",
+                "status": "waiting",
+                "success": False,
+                "message": "还在画，画好了再说打印呀。",
+            }
+        return {
+            "type": "print",
+            "status": "none",
+            "success": False,
+            "message": "现在没有可以打印的画，先画一张吧。",
+        }
+    latest = jobs[-1]
+    queued = queue_print_job(latest["job_id"], device_token)
+    if not queued:
+        return {
+            "type": "print",
+            "status": "error",
+            "success": False,
+            "message": "这张还不能打印，我们再试一次。",
+        }
+    return {
+        "type": "print",
+        "status": "queued",
+        "success": True,
+        "message": "好的，这就打印出来！",
+        **queued,
+    }
+
+
+async def _enqueue_background_drawing(
+    fusion_input: str,
+    device_token: str,
+    text_response: str,
+    drawing_prompt: str,
+):
+    """Queue a drawing so later subjects (e.g. 小鱼 after 小猫/小狗) are not skipped."""
+    subject = (drawing_prompt or "").strip() or (fusion_input or "").strip()
+    if not subject:
+        logger.warning("[ASYNC_DRAW_BG] Empty subject, skip drawing")
+        return
+
+    scroll_meta = _scroll_meta_for_device(device_token)
+    item = (fusion_input, text_response, drawing_prompt, scroll_meta)
+    start_worker = False
+    async with _drawing_meta_lock:
+        _pending_drawings.setdefault(device_token, []).append(item)
+        _active_drawing_devices.add(device_token)
+        if device_token not in _drawing_workers:
+            _drawing_workers.add(device_token)
+            start_worker = True
+    logger.info(
+        f"[ASYNC_DRAW_BG] Queued '{subject}' scroll={scroll_meta.get('scroll_id')} "
+        f"seq={scroll_meta.get('seq')} pending={len(_pending_drawings.get(device_token, []))}"
+    )
+    if start_worker:
+        asyncio.create_task(_process_device_drawing_queue(device_token))
+
+
+async def _process_device_drawing_queue(device_token: str):
+    try:
+        while True:
+            async with _drawing_meta_lock:
+                pending = _pending_drawings.get(device_token) or []
+                if not pending:
+                    break
+                fusion_input, text_response, drawing_prompt, scroll_meta = pending.pop(0)
+            await _run_one_background_drawing(
+                fusion_input, device_token, text_response, drawing_prompt, scroll_meta
+            )
+    finally:
+        restart = False
+        async with _drawing_meta_lock:
+            if _pending_drawings.get(device_token):
+                restart = True
+            else:
+                _drawing_workers.discard(device_token)
+                _active_drawing_devices.discard(device_token)
+                _pending_drawings.pop(device_token, None)
+        if restart:
+            asyncio.create_task(_process_device_drawing_queue(device_token))
+
+
+async def _run_one_background_drawing(
+    fusion_input: str,
+    device_token: str,
+    text_response: str,
+    drawing_prompt: str,
+    scroll_meta: Optional[Dict[str, Any]] = None,
+):
+    subject = (drawing_prompt or "").strip() or (fusion_input or "").strip()
+    draw_start = time.time()
+    try:
+        async with _DRAWING_SEMAPHORE:
+            logger.info(f"[ASYNC_DRAW_BG] 🎨 Background drawing started for: '{subject}' (token: {device_token})")
+            action = await _execute_drawing_with_fusion(
+                subject, device_token, text_response, scroll_meta=scroll_meta
+            )
+            draw_duration = time.time() - draw_start
+            if action:
+                logger.info(f"[ASYNC_DRAW_BG] ✅ Drawing {action.get('job_id')} ready for screen preview in {draw_duration:.2f}s (await user Print button)")
+            else:
+                logger.warning(f"[ASYNC_DRAW_BG] ⚠️ Drawing finished with no action returned ({draw_duration:.2f}s)")
+    except Exception as e:
+        logger.error(f"[ASYNC_DRAW_BG] ❌ Drawing generation failed in background: {e}")
 
 
 async def _background_drawing_and_record(
@@ -707,31 +893,7 @@ async def _background_drawing_and_record(
     drawing_prompt: str
 ):
     """Background task: generate Seedream line art and save as status=ready (screen preview). Does NOT auto-print."""
-    # Prefer LLM drawing_prompt — never send greetings / "好的画出来" as the image subject
-    subject = (drawing_prompt or "").strip() or (fusion_input or "").strip()
-    if not subject:
-        logger.warning("[ASYNC_DRAW_BG] Empty subject, skip drawing")
-        return
-
-    if device_token in _active_drawing_devices:
-        logger.info(f"[ASYNC_DRAW_BG] Skip — device {device_token} already has an active drawing job")
-        return
-
-    draw_start = time.time()
-    _active_drawing_devices.add(device_token)
-    try:
-        async with _DRAWING_SEMAPHORE:
-            logger.info(f"[ASYNC_DRAW_BG] 🎨 Background drawing started for: '{subject}' (token: {device_token})")
-            action = await _execute_drawing_with_fusion(subject, device_token, text_response)
-            draw_duration = time.time() - draw_start
-            if action:
-                logger.info(f"[ASYNC_DRAW_BG] ✅ Drawing {action.get('job_id')} ready for screen preview in {draw_duration:.2f}s (await user Print button)")
-            else:
-                logger.warning(f"[ASYNC_DRAW_BG] ⚠️ Drawing finished with no action returned ({draw_duration:.2f}s)")
-    except Exception as e:
-        logger.error(f"[ASYNC_DRAW_BG] ❌ Drawing generation failed in background: {e}")
-    finally:
-        _active_drawing_devices.discard(device_token)
+    await _enqueue_background_drawing(fusion_input, device_token, text_response, drawing_prompt)
 
 
 async def _background_save_psych_vector(
@@ -777,6 +939,7 @@ async def _execute_drawing_with_fusion(
     user_text: str,
     device_token: str,
     ai_response: str = "",
+    scroll_meta: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Same PromptFusion drawing pipeline as SSE text chat."""
     context = ConversationManager.get_conversation_context(device_token)
@@ -797,7 +960,15 @@ async def _execute_drawing_with_fusion(
     fused_prompt = fusion_result.get("fused_prompt") or user_text
     logger.info(f"[DRAWING] Fusion prompt: '{fused_prompt}' (op={operation['type']})")
 
-    action = await async_generate_drawing_with_fusion(fused_prompt, device_token, fusion_result)
+    meta = scroll_meta or _scroll_meta_for_device(device_token)
+    action = await async_generate_drawing_with_fusion(
+        fused_prompt,
+        device_token,
+        fusion_result,
+        seed=meta.get("seed"),
+        scroll_id=meta.get("scroll_id"),
+        seq=meta.get("seq"),
+    )
     if not action:
         return None
 
@@ -910,6 +1081,15 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
                 psych_metrics, device_token,
             )
 
+            print_action = None
+            if _is_print_intent(user_text):
+                requires_drawing = False
+                drawing_prompt = ""
+                print_action = _handle_voice_print(device_token)
+                text_response = print_action.get("message") or text_response
+            elif requires_drawing and text_response and "打印" not in text_response:
+                text_response = text_response.rstrip("。！!? ") + "。画好了告诉我一声，要不要打印呀？"
+
             logger.info(
                 f"[DOUBAO] Pipeline OK. Transcript: '{user_text}', "
                 f"Reply: '{text_response}', Drawing: {requires_drawing} ({drawing_prompt})"
@@ -926,18 +1106,21 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
                 )
 
             # 2. If drawing is requested, launch drawing as an independent background task (DO NOT block the HTTP response!)
-            action_preview = None
+            action_preview = print_action
             if requires_drawing and (drawing_prompt or user_text):
                 # Prefer drawing_prompt so Seedream never gets greetings / "好的画出来"
                 fusion_input = drawing_prompt or user_text
                 asyncio.create_task(
-                    _background_drawing_and_record(fusion_input, device_token, text_response, drawing_prompt)
+                    _enqueue_background_drawing(fusion_input, device_token, text_response, drawing_prompt)
                 )
+                scroll_id, seed = ConversationManager.ensure_scroll(device_token)
                 action_preview = {
                     "type": "draw",
                     "status": "generating",
                     "prompt": drawing_prompt or fusion_input,
-                    "message": "画作生成中，完成后请在屏幕点击打印按钮出纸"
+                    "message": "画作生成中，完成后请在屏幕点击打印按钮出纸",
+                    "scroll_id": scroll_id,
+                    "seed": seed,
                 }
 
             # 3. Update and persist message history to conversation context

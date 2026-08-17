@@ -1,6 +1,7 @@
 import datetime
-import time
-from typing import List, Dict, Any, Optional
+import random
+import uuid
+from typing import List, Dict, Any, Optional, Tuple
 from src.database import SessionLocal
 from src.conversation_models import ConversationContext, DrawingHistory
 
@@ -38,6 +39,8 @@ class ConversationManager:
                 "last_generated_prompt": record.last_generated_prompt,
                 "last_operation_type": record.last_operation_type,
                 "last_operation_detail": {},
+                "current_scroll_id": getattr(record, "current_scroll_id", None),
+                "current_seed": getattr(record, "current_seed", None),
                 "created_at": record.created_at,
                 "updated_at": record.updated_at
             }
@@ -82,6 +85,93 @@ class ConversationManager:
             print(f"[ERROR] [CONV_CRUD] create_or_update_conversation_context failed: {e}")
             db.rollback()
             return False
+        finally:
+            db.close()
+
+    @staticmethod
+    def _new_seed() -> int:
+        return random.randint(1, 2147483647)
+
+    @staticmethod
+    def ensure_scroll(device_token: str) -> Tuple[str, int]:
+        """Return the device's current scroll_id and seed, creating them if missing."""
+        db = SessionLocal()
+        try:
+            record = db.query(ConversationContext).filter(ConversationContext.device_token == device_token).first()
+            if record and getattr(record, "current_scroll_id", None) and getattr(record, "current_seed", None) is not None:
+                return record.current_scroll_id, int(record.current_seed)
+
+            scroll_id = str(uuid.uuid4())
+            seed = ConversationManager._new_seed()
+            now = datetime.datetime.utcnow()
+            if record:
+                record.current_scroll_id = scroll_id
+                record.current_seed = seed
+                record.updated_at = now
+            else:
+                record = ConversationContext(
+                    device_token=device_token,
+                    message_history=[],
+                    scene_elements=[],
+                    current_scroll_id=scroll_id,
+                    current_seed=seed,
+                    created_at=now,
+                    updated_at=now,
+                )
+                db.add(record)
+            db.commit()
+            print(f"[INFO] [SCROLL] Ensured scroll {scroll_id} seed={seed} token={device_token[:8]}***")
+            return scroll_id, seed
+        except Exception as e:
+            print(f"[ERROR] [CONV_CRUD] ensure_scroll failed: {e}")
+            db.rollback()
+            return str(uuid.uuid4()), ConversationManager._new_seed()
+        finally:
+            db.close()
+
+    @staticmethod
+    def start_new_scroll(device_token: str) -> Dict[str, Any]:
+        """Open a new related-image scroll: new seed, empty scene. Does not reset chat history."""
+        db = SessionLocal()
+        try:
+            scroll_id = str(uuid.uuid4())
+            seed = ConversationManager._new_seed()
+            now = datetime.datetime.utcnow()
+            record = db.query(ConversationContext).filter(ConversationContext.device_token == device_token).first()
+            if record:
+                record.current_scroll_id = scroll_id
+                record.current_seed = seed
+                record.scene_elements = []
+                record.last_generated_prompt = None
+                record.last_operation_type = None
+                record.updated_at = now
+            else:
+                record = ConversationContext(
+                    device_token=device_token,
+                    message_history=[],
+                    scene_elements=[],
+                    last_generated_prompt=None,
+                    last_operation_type=None,
+                    current_scroll_id=scroll_id,
+                    current_seed=seed,
+                    created_at=now,
+                    updated_at=now,
+                )
+                db.add(record)
+            db.commit()
+            from src.crud import reset_scroll_seq_cursor
+            reset_scroll_seq_cursor(scroll_id)
+            print(f"[INFO] [SCROLL] New scroll {scroll_id} seed={seed} token={device_token[:8]}***")
+            return {
+                "success": True,
+                "scroll_id": scroll_id,
+                "seed": seed,
+                "images": [],
+            }
+        except Exception as e:
+            print(f"[ERROR] [CONV_CRUD] start_new_scroll failed: {e}")
+            db.rollback()
+            return {"success": False, "scroll_id": None, "seed": None, "images": []}
         finally:
             db.close()
 

@@ -12,16 +12,15 @@ from src.config import ARK_API_KEY, VOLC_REALTIME_API_KEY
 from src.crud import (
     get_print_jobs_from_db,
     delete_print_job_from_db,
-    save_print_job_to_db,
     get_ready_drawings_from_db,
     queue_print_job,
-    get_print_job_by_id,
+    get_jobs_for_scroll,
+    queue_scroll_jobs,
 )
 from src.services import VoiceInteractionService, DoubaoAPI
 from src.business_logic import (
     process_llm_interaction, stream_chat_llm, async_generate_drawing, extract_drawing_subject, async_generate_drawing_with_fusion, is_device_drawing
 )
-from src.cache import DrawingCacheManager
 from src.prompt_refiner import PromptRefinerEngine
 from src.logger import setup_logger
 from src.conversation_crud import ConversationManager
@@ -94,8 +93,9 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
             logger.debug(f"[INTEGRATION] Message history count: {len(context.get('message_history', []))}")
 
         drawing_keywords = [
-            "画", "画画", "画一个", "画一只", "画一架", "画辆", "画朵", "画条", "画张", "画一幅", 
+            "画", "画画", "画一个", "画一只", "画一架", "画辆", "画朵", "画条", "画一条", "画张", "画一幅", 
             "画个", "画出", "画一画", "想要画", "帮我画", "可以画", "画出来",
+            "画小猫", "画小狗", "画小鱼", "画小兔",
             "增加", "加一个", "加个", "添一个", "多一个", "再画", "旁边加", "添加", "加上", 
             "去掉", "擦掉", "删除", "不要", "变成", "改色",
             "爱", "爱一下", "爱一个", "我爱", "喜欢", "喜欢画"
@@ -182,46 +182,10 @@ async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool]
             logger.info(f"[DRAWING] ==========================================")
             print(f"[DRAWING] Final prompt: {drawing_prompt}")
 
-            # Check Cache (using fused_prompt as cache key)
-            cache_mgr = DrawingCacheManager.get_instance()
-            cached_action = cache_mgr.get(drawing_prompt)
-            if cached_action:
-                logger.debug(f"[INTEGRATION] Cache hit for fused prompt: {drawing_prompt[:100]}")
-                job_id = str(uuid.uuid4())
-                action_result = {
-                    "type": "draw",
-                    "status": "ready",
-                    "prompt": subject,
-                    "fused_prompt": drawing_prompt,
-                    "operation": operation["type"],
-                    "scene_elements": fusion_result.get("all_elements_after"),
-                    "job_id": job_id,
-                    "image_url": cached_action.get("image_url"),
-                    "bitmap_hex": cached_action.get("bitmap_hex"),
-                    "message": "画作已生成，请在屏幕点击打印按钮出纸"
-                }
-                save_print_job_to_db({
-                    "job_id": job_id,
-                    "device_token": token,
-                    "status": "ready",
-                    "image_url": cached_action.get("image_url"),
-                    "bitmap_hex": cached_action.get("bitmap_hex"),
-                    "prompt": subject,
-                    "timestamp": time.time()
-                })
-                # Save to DrawingHistory in DB
-                ConversationManager.save_drawing_record(
-                    job_id=job_id,
-                    device_token=token,
-                    operation_type=operation["type"],
-                    scene_prompt=drawing_prompt,
-                    image_url=cached_action.get("image_url")
-                )
-            else:
-                logger.debug(f"[INTEGRATION] Cache miss, launching async draw task")
-                drawing_task = asyncio.create_task(
-                    async_generate_drawing_with_fusion(drawing_prompt, token, fusion_result)
-                )
+            logger.debug(f"[INTEGRATION] Launching async draw task")
+            drawing_task = asyncio.create_task(
+                async_generate_drawing_with_fusion(drawing_prompt, token, fusion_result)
+            )
 
         # Stream LLM text output token-by-token
         ai_response_text = ""
@@ -395,12 +359,15 @@ async def get_ready_drawings(request: Request):
     if not token:
         raise HTTPException(status_code=401, detail="Unauthorized")
     drawings = get_ready_drawings_from_db(device_token=token)
+    context = ConversationManager.get_conversation_context(token)
     return {
         "has_drawing": bool(drawings),
         "generating": is_device_drawing(token),
         "count": len(drawings),
         "drawings": drawings,
         "latest": drawings[-1] if drawings else None,
+        "scroll_id": (context or {}).get("current_scroll_id"),
+        "seed": (context or {}).get("current_seed"),
     }
 
 @router.get("/api/device/v1/print-jobs")
@@ -624,5 +591,53 @@ async def get_realtime_config(request: Request):
             "api_key": VOLC_REALTIME_API_KEY,
             "model": "1.2.6.1"
         }
+    }
+
+
+@router.post("/api/device/v1/scrolls/new")
+async def start_new_scroll(request: Request):
+    """Open a new related-image scroll (shared seed). Does not reset conversation."""
+    token = request.headers.get("x-device-token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    result = ConversationManager.start_new_scroll(token)
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail="Failed to start a new scroll")
+    logger.info(f"[SCROLL] New scroll {result.get('scroll_id')} seed={result.get('seed')} token={token[:5]}***")
+    return result
+
+
+@router.get("/api/device/v1/scrolls/current")
+async def get_current_scroll(request: Request):
+    token = request.headers.get("x-device-token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    scroll_id, seed = ConversationManager.ensure_scroll(token)
+    images = get_jobs_for_scroll(scroll_id, device_token=token)
+    return {
+        "success": True,
+        "scroll_id": scroll_id,
+        "seed": seed,
+        "images": images,
+        "generating": is_device_drawing(token),
+    }
+
+
+@router.post("/api/device/v1/scrolls/{scroll_id}/print")
+async def print_scroll(scroll_id: str, request: Request):
+    """Queue every ready drawing on this scroll for thermal print, in seq order. No auto-print."""
+    token = request.headers.get("x-device-token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    queued = queue_scroll_jobs(scroll_id, token)
+    if not queued:
+        raise HTTPException(status_code=404, detail="No ready drawings on this scroll")
+    logger.info(f"[SCROLL] Queued {len(queued)} drawings for print scroll={scroll_id} token={token[:5]}***")
+    return {
+        "success": True,
+        "scroll_id": scroll_id,
+        "count": len(queued),
+        "jobs": queued,
+        "message": "Scroll print confirmed. Device may now print these drawings in order.",
     }
 

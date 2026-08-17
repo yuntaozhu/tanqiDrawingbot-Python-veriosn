@@ -40,6 +40,9 @@ class PrintJobDB(Base):
     bitmap_hex = Column(Text, nullable=True)
     prompt = Column(Text)
     timestamp = Column(Float)
+    scroll_id = Column(String, index=True, nullable=True)
+    seed = Column(Integer, nullable=True)
+    seq = Column(Integer, nullable=True)
 
 class PsychVectorDB(Base):
     __tablename__ = "psych_vectors"

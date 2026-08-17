@@ -26,7 +26,7 @@ _db_initialized = False
 _db_init_lock = threading.Lock()
 
 def _migrate_print_jobs_columns():
-    """Add device_token/status to print_jobs if missing (Postgres/SQLite).
+    """Add missing columns on existing tables (Postgres/SQLite).
 
     Each ALTER runs in its own transaction so a 'column already exists' error
     on Postgres does not abort the whole batch (InFailedSqlTransaction).
@@ -40,23 +40,32 @@ def _migrate_print_jobs_columns():
         except Exception:
             return False
 
-    migrations = [
+    def _add_columns(table: str, migrations):
+        for col, stmt in migrations:
+            if _has_column(table, col):
+                continue
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(stmt))
+                print(f"[INFO] [DB] Migration applied: {stmt}")
+            except Exception as e:
+                msg = str(e).lower()
+                if "duplicate" in msg or "already exists" in msg or "exists" in msg:
+                    pass
+                else:
+                    print(f"[DEBUG] [DB] Migration skip/fail ({stmt}): {e}")
+
+    _add_columns("print_jobs", [
         ("device_token", "ALTER TABLE print_jobs ADD COLUMN device_token VARCHAR"),
         ("status", "ALTER TABLE print_jobs ADD COLUMN status VARCHAR DEFAULT 'ready'"),
-    ]
-    for col, stmt in migrations:
-        if _has_column("print_jobs", col):
-            continue
-        try:
-            with engine.begin() as conn:
-                conn.execute(text(stmt))
-            print(f"[INFO] [DB] Migration applied: {stmt}")
-        except Exception as e:
-            msg = str(e).lower()
-            if "duplicate" in msg or "already exists" in msg or "exists" in msg:
-                pass
-            else:
-                print(f"[DEBUG] [DB] Migration skip/fail ({stmt}): {e}")
+        ("scroll_id", "ALTER TABLE print_jobs ADD COLUMN scroll_id VARCHAR"),
+        ("seed", "ALTER TABLE print_jobs ADD COLUMN seed INTEGER"),
+        ("seq", "ALTER TABLE print_jobs ADD COLUMN seq INTEGER"),
+    ])
+    _add_columns("conversation_contexts", [
+        ("current_scroll_id", "ALTER TABLE conversation_contexts ADD COLUMN current_scroll_id VARCHAR(255)"),
+        ("current_seed", "ALTER TABLE conversation_contexts ADD COLUMN current_seed INTEGER"),
+    ])
 
     if _has_column("print_jobs", "status"):
         try:

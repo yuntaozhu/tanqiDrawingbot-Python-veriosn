@@ -27,6 +27,22 @@ from src.utils import retry_with_backoff, preprocess_audio, get_image_metadata
 from tts_conversion_helper import convert_audio_to_target_samplerate
 from src.volc_realtime import VolcRealtimeClient
 
+
+def normalize_tts_text(text: str) -> str:
+    """Strip wave dashes and lone 哦 so child TTS does not jump or chop."""
+    if not text:
+        return text
+    t = text.strip()
+    t = t.replace("～", "，").replace("~", "，").replace("〜", "，")
+    t = t.replace("…", "，").replace("...", "，")
+    if re.fullmatch(r"[哦喔噢啊呀]+[，。！？]*", t):
+        return "嗯，我在听。"
+    t = re.sub(r"哦[，。！？]*", "，", t)
+    t = re.sub(r"[，]{2,}", "，", t)
+    t = re.sub(r"^[，。\s]+", "", t)
+    t = re.sub(r"[，。\s]+$", lambda m: "。" if "。" in m.group(0) or "，" in m.group(0) else "", t)
+    return (t.strip() or text.strip())
+
 CACHE_FILE = "image_cache.json"
 STT_CACHE_FILE = "stt_cache.json"
 TTS_CACHE_FILE = "tts_cache.json"
@@ -325,7 +341,7 @@ class DeepSeekAPI:
             "text": text,
             "voice_type": VOLC_TTS_V3_VOICE_TYPE,
             "encoding": "mp3",
-            "speed_ratio": 1.0,
+            "speed_ratio": 0.92,
             "volume_ratio": 1.0,
             "pitch_ratio": 1.0,
             # 语音指令：活泼欢快的孩童语气
@@ -357,6 +373,9 @@ class DeepSeekAPI:
     @retry_with_backoff(max_retries=2)
     def generate_speech(self, text: str, voice_name: Optional[str] = None) -> Optional[str]:
         """Convert text to speech with fallback support for multiple providers."""
+        if not text:
+            return None
+        text = normalize_tts_text(text)
         if not text:
             return None
         
@@ -472,6 +491,9 @@ class DeepSeekAPI:
         text = text.strip() if text else ""
         if not text:
             return None
+        text = normalize_tts_text(text)
+        if not text:
+            return None
         
         chunks = split_text_into_chunks(text, max_chunk_len=120)
         audio_results = []
@@ -502,7 +524,7 @@ class DoubaoAPI:
         self.audio_model = ARK_AUDIO_MODEL
         self.chat_model = ARK_CHAT_MODEL
         self.draw_model = ARK_DRAW_MODEL
-        chat_timeout = httpx.Timeout(8.0, connect=3.0)
+        chat_timeout = httpx.Timeout(15.0, connect=3.0)
         draw_timeout = httpx.Timeout(60.0, connect=5.0)
         self.client = OpenAI(
             api_key=self.api_key,
@@ -560,7 +582,7 @@ class DoubaoAPI:
         cache_mgr.set(child_prompt, local_exp)
         return local_exp
 
-    def generate_image(self, prompt: str, aspect_ratio: str = "1:1", num_images: int = 1) -> Optional[List[str]]:
+    def generate_image(self, prompt: str, aspect_ratio: str = "1:1", num_images: int = 1, seed: Optional[int] = None) -> Optional[List[str]]:
         if not self.draw_client:
             raise ValueError("ARK_API_KEY is not set.")
         
@@ -575,19 +597,29 @@ class DoubaoAPI:
             f"CRITICAL: NO REALISTIC SHADING, NO GRADIENTS, NO GREYSCALE, NO TEXT, NO ENGLISH WORDS."
         )
         
-        def request_image(image_prompt: str):
+        def request_image(image_prompt: str, use_seed: bool = True):
+            extra_body = {"optimize_prompt_options": {"mode": "fast"}}
+            if use_seed and seed is not None:
+                extra_body["seed"] = int(seed)
             return self.draw_client.images.generate(
                 model=self.draw_model,
                 prompt=image_prompt,
                 size="1.5K",  # 1.5K is supported, and is more creative and price-effective than 1K
                 response_format="url",
-                extra_body={"optimize_prompt_options": {"mode": "fast"}},
+                extra_body=extra_body,
                 timeout=45,
             )
 
-        print(f"[DEBUG] [DOUBAO_DRAW] Generating prompt: '{optimized_prompt}'")
+        print(f"[DEBUG] [DOUBAO_DRAW] Generating prompt: '{optimized_prompt}' seed={seed}")
         try:
-            response = request_image(optimized_prompt)
+            try:
+                response = request_image(optimized_prompt)
+            except Exception as seed_err:
+                if seed is not None:
+                    print(f"[WARNING] [DOUBAO_DRAW] Seeded request failed ({seed_err}); retrying without seed")
+                    response = request_image(optimized_prompt, use_seed=False)
+                else:
+                    raise
             urls = [item.url for item in response.data]
             print(f"[DEBUG] [DOUBAO_DRAW] Success! Generated URL: {urls[0] if urls else 'None'}")
             return urls
@@ -1023,7 +1055,7 @@ def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protag
                 provider = DoubaoAPI.get_instance()
                 if not provider.draw_client:
                     raise RuntimeError("ARK_API_KEY is not configured")
-                image_urls = provider.generate_image(prompt, aspect_ratio, num_images)
+                image_urls = provider.generate_image(prompt, aspect_ratio, num_images, seed=seed)
             elif engine == "ideogram":
                 provider = IdeogramAPI.get_instance()
                 if not provider.api_key:

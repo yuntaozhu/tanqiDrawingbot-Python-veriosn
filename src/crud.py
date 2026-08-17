@@ -1,10 +1,13 @@
 import json
 import time
 from typing import List, Dict, Any, Optional
+from sqlalchemy import func
 from src.database import SessionLocal
 from src.models import (
     GenerationHistoryDB, FeedbackDB, PrintJobDB, PsychVectorDB, DeviceSettingsDB
 )
+
+_scroll_seq_cursor = {}
 
 def save_history_to_db(entry: Dict[str, Any]):
     db = SessionLocal()
@@ -96,7 +99,10 @@ def save_print_job_to_db(job: Dict[str, Any]):
             image_url=job["image_url"],
             bitmap_hex=job.get("bitmap_hex"),
             prompt=job["prompt"],
-            timestamp=job["timestamp"]
+            timestamp=job["timestamp"],
+            scroll_id=job.get("scroll_id"),
+            seed=job.get("seed"),
+            seq=job.get("seq"),
         )
         db.add(db_job)
         db.commit()
@@ -116,7 +122,64 @@ def _job_to_dict(j: PrintJobDB) -> Dict[str, Any]:
         "bitmap_hex": j.bitmap_hex,
         "prompt": j.prompt,
         "timestamp": j.timestamp,
+        "scroll_id": getattr(j, "scroll_id", None),
+        "seed": getattr(j, "seed", None),
+        "seq": getattr(j, "seq", None),
     }
+
+
+def allocate_scroll_seq(scroll_id: str) -> int:
+    """Monotonic seq for images on one scroll, including in-flight jobs not yet saved."""
+    db = SessionLocal()
+    db_next = 0
+    try:
+        max_seq = db.query(func.max(PrintJobDB.seq)).filter(PrintJobDB.scroll_id == scroll_id).scalar()
+        db_next = (max_seq if max_seq is not None else -1) + 1
+    except Exception as e:
+        print(f"[DEBUG] [DB] allocate_scroll_seq fallback: {e}")
+        db_next = 0
+    finally:
+        db.close()
+    mem = _scroll_seq_cursor.get(scroll_id, db_next)
+    seq = max(db_next, mem)
+    _scroll_seq_cursor[scroll_id] = seq + 1
+    return seq
+
+
+def reset_scroll_seq_cursor(scroll_id: str):
+    _scroll_seq_cursor[scroll_id] = 0
+
+
+def get_jobs_for_scroll(scroll_id: str, device_token: str = None, status: str = None) -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        q = db.query(PrintJobDB).filter(PrintJobDB.scroll_id == scroll_id)
+        if device_token:
+            q = q.filter(PrintJobDB.device_token == device_token)
+        if status:
+            q = q.filter(PrintJobDB.status == status)
+        jobs = q.order_by(PrintJobDB.timestamp.asc()).all()
+        jobs.sort(key=lambda j: (
+            j.seq if getattr(j, "seq", None) is not None else 10 ** 9,
+            j.timestamp or 0,
+        ))
+        return [_job_to_dict(j) for j in jobs]
+    except Exception as e:
+        print(f"Error getting scroll jobs: {e}")
+        return []
+    finally:
+        db.close()
+
+
+def queue_scroll_jobs(scroll_id: str, device_token: str) -> List[Dict[str, Any]]:
+    """Mark every ready drawing on this scroll as queued, in seq order."""
+    ready = get_jobs_for_scroll(scroll_id, device_token=device_token, status="ready")
+    queued = []
+    for job in ready:
+        result = queue_print_job(job["job_id"], device_token=device_token)
+        if result:
+            queued.append(result)
+    return queued
 
 def get_print_jobs_from_db(device_token: str = None, status: str = "queued") -> List[Dict[str, Any]]:
     """

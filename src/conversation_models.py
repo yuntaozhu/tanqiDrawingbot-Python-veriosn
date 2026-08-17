@@ -1,5 +1,5 @@
 import datetime
-from sqlalchemy import Column, String, JSON, Text, DateTime, ForeignKey
+from sqlalchemy import Column, String, JSON, Text, DateTime, ForeignKey, Integer
 from src.database import Base
 from src.config import DATABASE_URL
 
@@ -20,6 +20,8 @@ class ConversationContext(Base):
     scene_elements = Column(SceneElementsType, default=list)
     last_generated_prompt = Column(Text, nullable=True)
     last_operation_type = Column(String(50), nullable=True)
+    current_scroll_id = Column(String(255), nullable=True, index=True)
+    current_seed = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
