@@ -48,6 +48,7 @@ IDEOGRAM_API_KEY = os.getenv("IDEOGRAM_API_KEY")
 
 ARK_API_KEY = os.getenv("ARK_API_KEY")
 ARK_AUDIO_MODEL = os.getenv("ARK_AUDIO_MODEL", "doubao-seed-2-0-lite-260428")
+ARK_CHAT_MODEL = os.getenv("ARK_CHAT_MODEL", "doubao-seed-2-1-turbo")
 ARK_DRAW_MODEL = os.getenv("ARK_DRAW_MODEL", "doubao-seedream-5-0-pro-260628")
 ARK_TTS_MODEL = os.getenv("ARK_TTS_MODEL", "Doubao-Seed-VoiceDesign-1-0")
 EMBEDDING_MODEL_VISION = os.getenv("EMBEDDING_MODEL_VISION", "doubao-embedding-vision-251215")

@@ -6,12 +6,13 @@ import re
 import time
 import io
 from typing import Optional, List, Dict, Any
+import httpx
 from openai import OpenAI, AsyncOpenAI
 import requests
 import replicate
 
 from src.config import (
-    ARK_API_KEY, ARK_AUDIO_MODEL, ARK_DRAW_MODEL, ARK_TTS_MODEL,
+    ARK_API_KEY, ARK_AUDIO_MODEL, ARK_CHAT_MODEL, ARK_DRAW_MODEL, ARK_TTS_MODEL,
     EMBEDDING_MODEL_VISION, EMBEDDING_MODEL_TEXT,
     DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL,
     REPLICATE_API_TOKEN, IDEOGRAM_API_KEY,
@@ -499,9 +500,25 @@ class DoubaoAPI:
         self.api_key = ARK_API_KEY
         self.base_url = "https://ark.cn-beijing.volces.com/api/v3"
         self.audio_model = ARK_AUDIO_MODEL
+        self.chat_model = ARK_CHAT_MODEL
         self.draw_model = ARK_DRAW_MODEL
-        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
-        self.async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
+        chat_timeout = httpx.Timeout(8.0, connect=3.0)
+        draw_timeout = httpx.Timeout(60.0, connect=5.0)
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=chat_timeout,
+        ) if self.api_key else None
+        self.draw_client = OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=draw_timeout,
+        ) if self.api_key else None
+        self.async_client = AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=chat_timeout,
+        ) if self.api_key else None
         self._consecutive_embedding_failures = 0
 
     def _local_imaginative_expand(self, prompt: str) -> str:
@@ -544,7 +561,7 @@ class DoubaoAPI:
         return local_exp
 
     def generate_image(self, prompt: str, aspect_ratio: str = "1:1", num_images: int = 1) -> Optional[List[str]]:
-        if not self.client:
+        if not self.draw_client:
             raise ValueError("ARK_API_KEY is not set.")
         
         # Expand prompt first for maximum child-like creativity and imagination
@@ -559,7 +576,7 @@ class DoubaoAPI:
         )
         
         def request_image(image_prompt: str):
-            return self.client.images.generate(
+            return self.draw_client.images.generate(
                 model=self.draw_model,
                 prompt=image_prompt,
                 size="1.5K",  # 1.5K is supported, and is more creative and price-effective than 1K
@@ -757,7 +774,7 @@ class DoubaoAPI:
 3. ask_to_draw 时在回复末尾自然问一句要不要画刚才聊的主题。"""
 
         try:
-            print(f"[DEBUG] [DOUBAO_TEXT] Sending chat to {self.audio_model} (ask_to_draw={ask_to_draw})...")
+            print(f"[DEBUG] [DOUBAO_TEXT] Sending chat to {self.chat_model} service_tier=fast (ask_to_draw={ask_to_draw})...")
 
             messages = [{"role": "system", "content": system_instruction}]
             if history:
@@ -780,11 +797,11 @@ class DoubaoAPI:
             messages.append({"role": "user", "content": user_content})
 
             response = self.client.chat.completions.create(
-                model=self.audio_model,
+                model=self.chat_model,
                 messages=messages,
                 max_tokens=180,
                 temperature=0.7,
-                timeout=10
+                extra_body={"service_tier": "fast"},
             )
             content = response.choices[0].message.content
             print(f"[DEBUG] [DOUBAO_TEXT] Raw response: '{content}'")
@@ -977,11 +994,11 @@ def get_image_cache_key(prompt, seed, protagonist, ref_image, aspect_ratio, num_
     return hashlib.md5(key_str.encode('utf-8')).hexdigest()
 
 
-def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1, style: str = "default", preferred_engine: Optional[str] = None) -> Dict[str, Any]:
+def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protagonist: Optional[str] = None, ref_image: Optional[str] = None, aspect_ratio: str = "1:1", num_images: int = 1, style: str = "default", preferred_engine: Optional[str] = None, skip_cache: bool = False) -> Dict[str, Any]:
     global IMAGE_CACHE
     cache_key = get_image_cache_key(prompt, seed, protagonist, ref_image, aspect_ratio, num_images, style, preferred_engine)
     
-    if cache_key in IMAGE_CACHE:
+    if not skip_cache and cache_key in IMAGE_CACHE:
         entry = IMAGE_CACHE[cache_key]
         if isinstance(entry, list):
             print(f"Cache hit (Legacy) for prompt: '{prompt}'.")
@@ -1004,7 +1021,7 @@ def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protag
             print(f"Attempting to generate image using: {engine}")
             if engine == "doubao":
                 provider = DoubaoAPI.get_instance()
-                if not provider.client:
+                if not provider.draw_client:
                     raise RuntimeError("ARK_API_KEY is not configured")
                 image_urls = provider.generate_image(prompt, aspect_ratio, num_images)
             elif engine == "ideogram":
@@ -1035,13 +1052,14 @@ def generate_image_with_fallback(prompt: str, seed: Optional[int] = None, protag
                     print(f"Failed to fetch {engine} image metadata: {metadata_error}")
                     metadata.append(None)
 
-            IMAGE_CACHE[cache_key] = {
-                "urls": image_urls,
-                "metadata": metadata,
-                "timestamp": time.time(),
-                "engine": engine,
-            }
-            save_cache(CACHE_FILE, IMAGE_CACHE)
+            if not skip_cache:
+                IMAGE_CACHE[cache_key] = {
+                    "urls": image_urls,
+                    "metadata": metadata,
+                    "timestamp": time.time(),
+                    "engine": engine,
+                }
+                save_cache(CACHE_FILE, IMAGE_CACHE)
             print(f"Successfully generated image using: {engine}")
             return {"urls": image_urls, "metadata": metadata, "engine": engine}
         except Exception as error:

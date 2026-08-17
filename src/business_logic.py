@@ -404,7 +404,9 @@ async def async_generate_drawing_with_fusion(
     start_time = time.time()
     
     cache_mgr = DrawingCacheManager.get_instance()
-    cached = cache_mgr.get(fused_prompt)
+    operation = (fusion_result or {}).get("operation") or "create"
+    use_cache = operation == "create"
+    cached = cache_mgr.get(fused_prompt) if use_cache else None
     if cached:
         print(f"[DEBUG] [ASYNC_DRAW] Cache Hit for fused prompt: '{fused_prompt}'")
         job_id = str(uuid.uuid4())
@@ -441,7 +443,7 @@ async def async_generate_drawing_with_fusion(
 
     def _generate_sync():
         try:
-            result = generate_image_with_fallback(fused_prompt)
+            result = generate_image_with_fallback(fused_prompt, skip_cache=not use_cache)
             urls = result.get("urls")
             if urls:
                 processed_image, bitmap_hex = process_line_art_and_bitmap(urls[0])
@@ -500,10 +502,11 @@ async def async_generate_drawing_with_fusion(
             "bitmap_hex": bitmap_hex
         }
 
-        cache_mgr.set(fused_prompt, action)
+        if use_cache:
+            cache_mgr.set(fused_prompt, action)
 
         duration = time.time() - start_time
-        print(f"[DEBUG] [ASYNC_DRAW] Image generated with fusion and cached in {duration:.2f}s, job_id: {job_id}")
+        print(f"[DEBUG] [ASYNC_DRAW] Image generated with fusion in {duration:.2f}s, job_id: {job_id}, op={operation}, cached={use_cache}")
         return action
     else:
         logger.error(f"[ASYNC_DRAW] ❌ Image generation failed or returned empty result")
@@ -522,13 +525,13 @@ async def stream_chat_llm(user_text: str):
         try:
             print(f"[DEBUG] [STREAM_LLM] Attempting stream with Doubao (Async): '{user_text}'")
             stream = await doubao.async_client.chat.completions.create(
-                model=doubao.audio_model,
+                model=doubao.chat_model,
                 messages=[
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": user_text}
                 ],
                 stream=True,
-                timeout=15
+                extra_body={"service_tier": "fast"},
             )
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
@@ -691,6 +694,10 @@ def _apply_drawing_heuristics(
 # One Seedream job at a time (single Railway worker — concurrent draws starve voice LLM)
 _DRAWING_SEMAPHORE = asyncio.Semaphore(1)
 _active_drawing_devices: set = set()
+
+
+def is_device_drawing(device_token: str) -> bool:
+    return bool(device_token) and device_token in _active_drawing_devices
 
 
 async def _background_drawing_and_record(

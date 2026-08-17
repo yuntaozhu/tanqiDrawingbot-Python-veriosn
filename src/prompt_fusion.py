@@ -36,14 +36,22 @@ class PromptFusionEngine:
             # Add new element to history
             if target and target not in all_elements_after:
                 all_elements_after.append(target)
-            
-            elements_str = ", ".join(scene_elements) if scene_elements else "已有元素"
-            fused_prompt = f"基于已有包含 {elements_str} 的画面，在合适的位置增加一个 {target}。整个画面保持黑白卡通画风。"
+
+            # Seedream is text-to-image and cannot see the previous bitmap.
+            # Describe the full scene so both old and new subjects are generated.
+            elements_str = "、".join(all_elements_after) if all_elements_after else target
+            fused_prompt = (
+                f"同一张儿童涂色黑白线稿里同时画：{elements_str}。"
+                "两者都要完整清晰可见，纯白背景，粗线条卡通轮廓，无文字、无阴影。"
+            )
             
         elif operation_type == "modify":
-            # Modify existing element attributes (elements list remains identical or updated)
-            elements_str = ", ".join(scene_elements) if scene_elements else "已有元素"
-            fused_prompt = f"基于包含 {elements_str} 的已有画面，保持整体结构和其他角色不变，进行以下修改：{current_user_text}。"
+            elements_str = "、".join(all_elements_after) if all_elements_after else (previous_prompt or current_user_text)
+            fused_prompt = (
+                f"同一张儿童涂色黑白线稿，画面里有：{elements_str}。"
+                f"按小朋友的要求调整：{current_user_text}。"
+                "所有角色都要完整可见，纯白背景，粗线条卡通轮廓，无文字、无阴影。"
+            )
             
         elif operation_type == "remove":
             # Remove target element from list
@@ -61,8 +69,11 @@ class PromptFusionEngine:
                         except ValueError:
                             pass
                             
-            elements_str = ", ".join(scene_elements) if scene_elements else "已有元素"
-            fused_prompt = f"基于包含 {elements_str} 的已有画面，擦除/移除其中所有的 {target}，保留其他元素并使其在画面中完美和谐。"
+            remaining = "、".join(all_elements_after) if all_elements_after else "简单可爱的小场景"
+            fused_prompt = (
+                f"同一张儿童涂色黑白线稿，画面里只有：{remaining}。"
+                f"不要出现{target}。纯白背景，粗线条卡通轮廓，无文字、无阴影。"
+            )
             
         # Guarantee we don't have empty elements list
         if not all_elements_after:

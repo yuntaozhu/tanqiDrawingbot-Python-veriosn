@@ -19,7 +19,7 @@ from src.crud import (
 )
 from src.services import VoiceInteractionService, DoubaoAPI
 from src.business_logic import (
-    process_llm_interaction, stream_chat_llm, async_generate_drawing, extract_drawing_subject, async_generate_drawing_with_fusion
+    process_llm_interaction, stream_chat_llm, async_generate_drawing, extract_drawing_subject, async_generate_drawing_with_fusion, is_device_drawing
 )
 from src.cache import DrawingCacheManager
 from src.prompt_refiner import PromptRefinerEngine
@@ -397,6 +397,7 @@ async def get_ready_drawings(request: Request):
     drawings = get_ready_drawings_from_db(device_token=token)
     return {
         "has_drawing": bool(drawings),
+        "generating": is_device_drawing(token),
         "count": len(drawings),
         "drawings": drawings,
         "latest": drawings[-1] if drawings else None,
