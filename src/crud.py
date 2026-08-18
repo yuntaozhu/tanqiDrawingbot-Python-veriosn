@@ -105,8 +105,16 @@ def save_print_job_to_db(job: Dict[str, Any]):
             seq=job.get("seq"),
         )
         db.add(db_job)
+        token = job.get("device_token")
+        status = job.get("status") or "ready"
+        if token and status == "ready":
+            db.query(PrintJobDB).filter(
+                PrintJobDB.device_token == token,
+                PrintJobDB.status == "ready",
+                PrintJobDB.job_id != job["job_id"],
+            ).delete(synchronize_session=False)
         db.commit()
-        print(f"[DEBUG] [DB] Saved drawing job {job['job_id']} status={job.get('status') or 'ready'} token={job.get('device_token')}")
+        print(f"[DEBUG] [DB] Saved drawing job {job['job_id']} status={status} token={token}")
     except Exception as e:
         print(f"Error saving print job to DB: {e}")
         db.rollback()

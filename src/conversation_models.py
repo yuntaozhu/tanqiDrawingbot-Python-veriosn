@@ -22,6 +22,7 @@ class ConversationContext(Base):
     last_operation_type = Column(String(50), nullable=True)
     current_scroll_id = Column(String(255), nullable=True, index=True)
     current_seed = Column(Integer, nullable=True)
+    draft_prompt = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 

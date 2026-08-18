@@ -591,35 +591,35 @@ class DoubaoAPI:
         
         # Native Chinese prompt strategy for Doubao Seedream 5.0 pro
         optimized_prompt = (
-            f"天马行空的儿童涂色本线稿，极其富有儿童构思与童真想象力：{expanded_prompt}。"
-            f"画面只有纯粹的黑白单色线条，具有加粗平滑的卡通轮廓线条，纯白背景，高对比度，没有半点阴影或渐变，"
-            f"没有灰色调，1-bit 干净矢量线稿。构图居中饱满，富有童话故事趣味，完美适合儿童热敏纸打印和上色涂涂乐。"
-            f"CRITICAL: NO REALISTIC SHADING, NO GRADIENTS, NO GREYSCALE, NO TEXT, NO ENGLISH WORDS."
+            f"正方形构图 1:1 square composition，儿童涂色本线稿，童真想象力：{expanded_prompt}。"
+            f"画面只有纯粹的黑白单色线条，加粗平滑卡通轮廓，纯白背景，高对比度，没有阴影或渐变，"
+            f"没有灰色调。主体居中饱满，完美适合正方形热敏纸打印和上色。"
+            f"CRITICAL: SQUARE 1:1, NO REALISTIC SHADING, NO GRADIENTS, NO GREYSCALE, NO TEXT, NO ENGLISH WORDS."
         )
         
-        def request_image(image_prompt: str, use_seed: bool = True):
+        def request_image(image_prompt: str, use_seed: bool = True, size: str = "2048x2048"):
             extra_body = {"optimize_prompt_options": {"mode": "fast"}}
             if use_seed and seed is not None:
                 extra_body["seed"] = int(seed)
             return self.draw_client.images.generate(
                 model=self.draw_model,
                 prompt=image_prompt,
-                size="1.5K",  # 1.5K is supported, and is more creative and price-effective than 1K
+                size=size,
                 response_format="url",
                 extra_body=extra_body,
                 timeout=45,
             )
 
-        print(f"[DEBUG] [DOUBAO_DRAW] Generating prompt: '{optimized_prompt}' seed={seed}")
+        print(f"[DEBUG] [DOUBAO_DRAW] Generating square prompt: '{optimized_prompt}' seed={seed}")
         try:
             try:
                 response = request_image(optimized_prompt)
-            except Exception as seed_err:
-                if seed is not None:
-                    print(f"[WARNING] [DOUBAO_DRAW] Seeded request failed ({seed_err}); retrying without seed")
-                    response = request_image(optimized_prompt, use_seed=False)
-                else:
-                    raise
+            except Exception as size_err:
+                print(f"[WARNING] [DOUBAO_DRAW] 2048x2048 failed ({size_err}); retrying 2K/1.5K")
+                try:
+                    response = request_image(optimized_prompt, size="2K")
+                except Exception:
+                    response = request_image(optimized_prompt, use_seed=False, size="1.5K")
             urls = [item.url for item in response.data]
             print(f"[DEBUG] [DOUBAO_DRAW] Success! Generated URL: {urls[0] if urls else 'None'}")
             return urls
@@ -785,7 +785,8 @@ class DoubaoAPI:
         self,
         text_prompt: str,
         history: Optional[List[Dict[str, Any]]] = None,
-        ask_to_draw: bool = False
+        ask_to_draw: bool = False,
+        draft_prompt: str = "",
     ) -> Optional[Dict[str, Any]]:
         """Realtime dialog — no retry (timeouts must fail fast for voice UX)."""
         if not self.client:
@@ -795,46 +796,64 @@ class DoubaoAPI:
 只返回合法 JSON（不要 markdown）：
 {
   "user_transcript": "原样填写孩子的话",
-  "assistant_reply": "1-2句童趣回复",
+  "assistant_reply": "1-2句童趣回复，卡住时根据画面草稿问一个具体问题",
   "requires_drawing": false,
-  "drawing_prompt": "",
+  "drawing_prompt": "一句完整画面描述（主体+颜色+地点+动作），即使这轮不画也要更新",
   "psych_metrics": {"detected_emotions": [], "key_interests": []}
 }
 规则：
-1. requires_drawing=true 仅当孩子明确要画画（如帮我画/画一只小狗），或对你刚才'要不要画出来'作简短肯定（好/要/画吧）。
-2. 问候、闲聊、'没看到画'不要画。requires_drawing=true 时 drawing_prompt 写具体画面（如草地上的可爱小狗），不要写'画出来'或问候语。
-3. ask_to_draw 时在回复末尾自然问一句要不要画刚才聊的主题。"""
+1. requires_drawing=true 仅当孩子明确要画画（画出来/帮我画/画一只小狗），或对你刚才'要不要画出来'作简短肯定（好/要/画吧）。
+2. 问候、闲聊、'没看到画'、思考中的嗯啊不要画。
+3. drawing_prompt 每轮都根据孩子新说的话更新画面草稿，不要留空（除非完全没有画面信息）。
+4. ask_to_draw 时在回复末尾自然问一句要不要把刚才聊的画出来。
+5. 不要催着连续画画，一次对话只准备一张图。"""
 
         try:
             print(f"[DEBUG] [DOUBAO_TEXT] Sending chat to {self.chat_model} service_tier=fast (ask_to_draw={ask_to_draw})...")
 
             messages = [{"role": "system", "content": system_instruction}]
             if history:
-                for item in history[-2:]:
+                for item in history[-4:]:
                     u_text = (item.get("user_text") or "")[:80]
                     a_resp = item.get("ai_response") or ""
                     if u_text:
                         messages.append({"role": "user", "content": u_text})
                     if a_resp:
-                        # Truncate long history replies to keep latency down
                         messages.append({
                             "role": "assistant",
                             "content": (a_resp[:80] + "…") if len(a_resp) > 80 else a_resp,
                         })
 
             user_content = text_prompt
+            if draft_prompt:
+                user_content += f"\n（系统：当前画面草稿：{draft_prompt[:80]}。请按孩子这轮话更新 drawing_prompt。）"
             if ask_to_draw:
                 user_content += "\n（系统：请在回复末尾自然问问要不要把刚才聊的画出来）"
 
             messages.append({"role": "user", "content": user_content})
 
-            response = self.client.chat.completions.create(
-                model=self.chat_model,
-                messages=messages,
-                max_tokens=180,
-                temperature=0.7,
-                extra_body={"service_tier": "fast"},
-            )
+            extra_body = {"service_tier": "fast", "thinking": {"type": "disabled"}}
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.chat_model,
+                    messages=messages,
+                    max_tokens=180,
+                    temperature=0.7,
+                    extra_body=extra_body,
+                )
+            except Exception as extra_err:
+                err_text = str(extra_err).lower()
+                if "thinking" in err_text or "400" in err_text:
+                    print(f"[WARNING] [DOUBAO_TEXT] extra_body rejected ({extra_err}); retry service_tier=fast only")
+                    response = self.client.chat.completions.create(
+                        model=self.chat_model,
+                        messages=messages,
+                        max_tokens=180,
+                        temperature=0.7,
+                        extra_body={"service_tier": "fast"},
+                    )
+                else:
+                    raise
             content = response.choices[0].message.content
             print(f"[DEBUG] [DOUBAO_TEXT] Raw response: '{content}'")
 

@@ -24,7 +24,7 @@ from src.services import (
     DeepSeekAPI, DoubaoAPI, ReplicateAPI, generate_image_with_fallback,
     VoiceInteractionService
 )
-from src.prompt_fusion import PromptFusionEngine, ConversationContextManager
+from src.prompt_fusion import ConversationContextManager
 from src.conversation_crud import ConversationManager
 
 def similarity_search_vectors(device_token: str, query_embedding: List[float], top_k: int = 5) -> List[Dict[str, Any]]:
@@ -224,17 +224,85 @@ def _is_short_affirmation(user_text: str) -> bool:
 
 
 EXPLICIT_DRAW_KEYWORDS = [
-    "画画", "画一个", "画一只", "画一条", "画只", "画张", "画条", "画一幅", "画一画",
-    "想要画", "帮我画", "可以画", "画个", "画出", "想画",
-    "画出来", "画出来吧", "再画", "画小猫", "画小狗", "画小兔", "画小鱼",
-    "画只小", "画条鱼", "画鱼", "一条小鱼",
+    "画画", "画一个", "画一只", "画一条", "画一张", "画一幅", "画一画",
+    "画一朵", "画一辆", "画一座", "画一只小",
+    "画只", "画张", "画条", "画个", "画出",
+    "想要画", "帮我画", "可以画", "想画", "给我画", "开始画",
+    "画出来", "画出来吧", "把它画出来", "再画",
+    "画小猫", "画小狗", "画小兔", "画小鱼", "画只小", "画条鱼", "画鱼", "一条小鱼",
 ]
+
+COMPLETE_DRAW_PHRASES = {
+    "画出来", "画出来吧", "把它画出来", "开始画", "给我画", "帮我画",
+    "画画", "画一张", "画一幅", "画一画",
+}
+
+THINKING_TOKENS = {
+    "嗯", "啊", "呃", "额", "那个", "嗯嗯", "啊啊", "然后", "就是", "这个", "唔",
+}
 
 
 def _has_explicit_draw_intent(user_text: str) -> bool:
     if not user_text:
         return False
     return any(kw in user_text for kw in EXPLICIT_DRAW_KEYWORDS)
+
+
+def _is_complete_draw_command(user_text: str) -> bool:
+    """True when the child wants to render the accumulated draft, with no new subject."""
+    if not user_text:
+        return False
+    trimmed = user_text.strip("。，！？.!? ～~、 ")
+    return trimmed in COMPLETE_DRAW_PHRASES
+
+
+def _is_thinking_utterance(user_text: str) -> bool:
+    if not user_text:
+        return True
+    trimmed = user_text.strip("。，！？.!? ～~、 ")
+    if not trimmed:
+        return True
+    return trimmed in THINKING_TOKENS or (len(trimmed) <= 2 and trimmed in THINKING_TOKENS)
+
+
+def _draft_subject(draft_prompt: str) -> str:
+    text = (draft_prompt or "").strip()
+    if not text:
+        return "它"
+    return text[:8]
+
+
+def _followup_question(draft_prompt: str, history: Optional[List[Dict[str, Any]]] = None) -> str:
+    """Ask one concrete question from the current draft — no extra LLM call."""
+    draft = (draft_prompt or "").strip()
+    color_marks = ("红", "黄", "蓝", "绿", "橙", "粉", "白", "黑", "紫", "彩色", "橘色", "金色")
+    place_marks = ("公园", "家里", "天上", "海里", "森林", "草地", "学校", "河边", "花园")
+    if draft:
+        subject = _draft_subject(draft)
+        if not any(c in draft for c in color_marks):
+            return f"{subject}是什么颜色的呀？"
+        if not any(p in draft for p in place_marks):
+            return f"{subject}在哪里玩呀？"
+        return f"那{subject}在干什么呢？想好了也可以说画出来。"
+    last_user = ""
+    for msg in reversed(history or []):
+        last_user = ((msg or {}).get("user_text") or "").strip()
+        if last_user:
+            break
+    if last_user:
+        snippet = last_user[:10]
+        return f"你刚说的「{snippet}」，再给小探宝讲一点好不好？"
+    return "想好了跟小探宝说呀，我们慢慢聊。"
+
+
+def _merge_draft_prompt(existing: str, incoming: str) -> str:
+    incoming = (incoming or "").strip()
+    existing = (existing or "").strip()
+    vague = {"", "画", "画画", "画出来", "好的", "好的画出来", "画出来吧"}
+    compact = incoming.replace("，", "").replace("。", "").replace(" ", "")
+    if incoming and compact not in vague:
+        return incoming[:80]
+    return existing
 
 
 def _is_print_intent(user_text: str) -> bool:
@@ -435,6 +503,7 @@ async def async_generate_drawing_with_fusion(
     seed: Optional[int] = None,
     scroll_id: Optional[str] = None,
     seq: Optional[int] = None,
+    epoch: int = 0,
 ) -> Optional[Dict[str, Any]]:
     """
     Generates drawing line art asynchronously using fused_prompt and persists history.
@@ -454,6 +523,9 @@ async def async_generate_drawing_with_fusion(
     use_drawing_cache = operation == "create" and seed is None
     cached = cache_mgr.get(fused_prompt) if use_drawing_cache else None
     if cached:
+        if not await _is_current_draw_epoch(device_token, epoch):
+            logger.info(f"[ASYNC_DRAW] Discard stale cache-hit epoch={epoch}")
+            return None
         print(f"[DEBUG] [ASYNC_DRAW] Cache Hit for fused prompt: '{fused_prompt}'")
         job_id = str(uuid.uuid4())
         save_print_job_to_db({
@@ -516,6 +588,9 @@ async def async_generate_drawing_with_fusion(
         processed_image, bitmap_hex = None, None
 
     if processed_image and isinstance(processed_image, str) and len(processed_image.strip()) > 0:
+        if not await _is_current_draw_epoch(device_token, epoch):
+            logger.info(f"[ASYNC_DRAW] Discard stale generated image epoch={epoch}")
+            return None
         job_id = str(uuid.uuid4())
         logger.info(f"[ASYNC_DRAW] ✅ Image ready for preview (manual print). URL length: {len(processed_image)}")
         
@@ -639,6 +714,7 @@ def _default_conversation_context(device_token: str) -> Dict[str, Any]:
         "last_operation_detail": {},
         "current_scroll_id": None,
         "current_seed": None,
+        "draft_prompt": "",
     }
 
 
@@ -663,7 +739,7 @@ def _dialog_unavailable_response(user_text: str) -> Dict[str, Any]:
     """Keep recognized speech usable when the dialog model is temporarily unavailable."""
     wants_draw = _has_explicit_draw_intent(user_text)
     if wants_draw:
-        reply = "好呀，我马上画给你！画好了你看屏幕，想打印就说打印。"
+        reply = "好呀，我马上画给你！画好了看屏幕，点打印就能出纸。"
     else:
         reply = "我听到你说的话啦。我们先继续玩，马上再和你聊！"
     return {
@@ -696,17 +772,19 @@ def _apply_drawing_heuristics(
     # Never treat "where's my drawing" as a new draw request
     if _is_preview_lookback_request(user_text):
         logger.info(f"[HEURISTIC] Preview lookback — skip drawing. user='{user_text}'")
-        return False, ""
-
-    # Explicit draw phrases only (no bare "画" alone matching greetings)
-    if not requires_drawing and _has_explicit_draw_intent(user_text):
-        logger.debug(f"[HEURISTIC] Explicit draw intent from user: '{user_text}'")
-        requires_drawing = True
+        return False, drawing_prompt
 
     conv_context = ConversationManager.get_conversation_context(device_token)
+    draft = ((conv_context or {}).get("draft_prompt") or "").strip()
 
-    # Agreeing to a previous AI invitation — only short affirmations
-    if not requires_drawing and conv_context:
+    # Command words / invite-affirmation only. Ignore LLM requires_drawing on idle chat
+    # so Seedream never blocks a child's conversation turn.
+    llm_wants_draw = bool(requires_drawing)
+    requires_drawing = False
+    if _has_explicit_draw_intent(user_text):
+        requires_drawing = True
+        logger.debug(f"[HEURISTIC] Explicit draw command: '{user_text}'")
+    elif conv_context:
         history = conv_context.get("message_history", [])
         if history:
             last_ai_msg = history[-1].get("ai_response", "") or ""
@@ -714,21 +792,24 @@ def _apply_drawing_heuristics(
                 "画出来", "要不要画", "想不想画", "画一张", "画一幅", "帮你画"
             ])
             if invited and _is_short_affirmation(user_text):
-                logger.debug(f"[HEURISTIC] Short affirmation after invite: '{user_text}'")
                 requires_drawing = True
-
-    # Do NOT force drawing just because assistant mentioned 画/马上 — that caused false positives.
-    # Do NOT force drawing just because drawing_prompt is non-empty unless LLM already set requires_drawing.
+                logger.debug(f"[HEURISTIC] Short affirmation after invite: '{user_text}'")
+    if llm_wants_draw and not requires_drawing:
+        logger.info(f"[HEURISTIC] LLM wanted draw but no command word — keep chatting. user='{user_text}'")
 
     if not requires_drawing:
-        return False, ""
+        return False, drawing_prompt
 
     # Recover a concrete subject when prompt is empty / vague
-    vague = {"", "画", "画画", "画出来", "好的", "好的画出来", "画出来吧"}
-    if not drawing_prompt or drawing_prompt.replace("，", "").replace("。", "").replace(" ", "") in vague:
+    vague = {"", "画", "画画", "画出来", "好的", "好的画出来", "画出来吧", "开始画", "给我画", "帮我画"}
+    if _is_complete_draw_command(user_text) and draft:
+        drawing_prompt = draft
+    elif not drawing_prompt or drawing_prompt.replace("，", "").replace("。", "").replace(" ", "") in vague:
         extracted = extract_drawing_subject_advanced(user_text, text_response, conv_context)
         if extracted and extracted not in vague:
             drawing_prompt = extracted
+        elif draft:
+            drawing_prompt = draft
         elif conv_context:
             # Prefer last successful drawing subject from history
             for msg in reversed(conv_context.get("message_history", []) or []):
@@ -759,6 +840,14 @@ _active_drawing_devices: set = set()
 _pending_drawings: Dict[str, list] = {}
 _drawing_workers: set = set()
 _drawing_meta_lock = asyncio.Lock()
+_draw_epoch: Dict[str, int] = {}
+
+
+async def _is_current_draw_epoch(device_token: str, epoch: int) -> bool:
+    if not epoch:
+        return True
+    async with _drawing_meta_lock:
+        return _draw_epoch.get(device_token) == epoch
 
 
 def is_device_drawing(device_token: str) -> bool:
@@ -815,24 +904,26 @@ async def _enqueue_background_drawing(
     text_response: str,
     drawing_prompt: str,
 ):
-    """Queue a drawing so later subjects (e.g. 小鱼 after 小猫/小狗) are not skipped."""
+    """Keep only the latest requested square image; older pending jobs are replaced."""
     subject = (drawing_prompt or "").strip() or (fusion_input or "").strip()
     if not subject:
         logger.warning("[ASYNC_DRAW_BG] Empty subject, skip drawing")
         return
 
     scroll_meta = _scroll_meta_for_device(device_token)
-    item = (fusion_input, text_response, drawing_prompt, scroll_meta)
     start_worker = False
     async with _drawing_meta_lock:
-        _pending_drawings.setdefault(device_token, []).append(item)
+        epoch = _draw_epoch.get(device_token, 0) + 1
+        _draw_epoch[device_token] = epoch
+        item = (fusion_input, text_response, drawing_prompt, scroll_meta, epoch)
+        _pending_drawings[device_token] = [item]
         _active_drawing_devices.add(device_token)
         if device_token not in _drawing_workers:
             _drawing_workers.add(device_token)
             start_worker = True
     logger.info(
-        f"[ASYNC_DRAW_BG] Queued '{subject}' scroll={scroll_meta.get('scroll_id')} "
-        f"seq={scroll_meta.get('seq')} pending={len(_pending_drawings.get(device_token, []))}"
+        f"[ASYNC_DRAW_BG] Latest-only queue '{subject}' epoch={epoch} "
+        f"scroll={scroll_meta.get('scroll_id')} seq={scroll_meta.get('seq')}"
     )
     if start_worker:
         asyncio.create_task(_process_device_drawing_queue(device_token))
@@ -845,9 +936,9 @@ async def _process_device_drawing_queue(device_token: str):
                 pending = _pending_drawings.get(device_token) or []
                 if not pending:
                     break
-                fusion_input, text_response, drawing_prompt, scroll_meta = pending.pop(0)
+                fusion_input, text_response, drawing_prompt, scroll_meta, epoch = pending.pop(0)
             await _run_one_background_drawing(
-                fusion_input, device_token, text_response, drawing_prompt, scroll_meta
+                fusion_input, device_token, text_response, drawing_prompt, scroll_meta, epoch
             )
     finally:
         restart = False
@@ -868,14 +959,19 @@ async def _run_one_background_drawing(
     text_response: str,
     drawing_prompt: str,
     scroll_meta: Optional[Dict[str, Any]] = None,
+    epoch: int = 0,
 ):
     subject = (drawing_prompt or "").strip() or (fusion_input or "").strip()
     draw_start = time.time()
     try:
         async with _DRAWING_SEMAPHORE:
+            async with _drawing_meta_lock:
+                if _draw_epoch.get(device_token) != epoch:
+                    logger.info(f"[ASYNC_DRAW_BG] Skip stale epoch={epoch} for '{subject}'")
+                    return
             logger.info(f"[ASYNC_DRAW_BG] 🎨 Background drawing started for: '{subject}' (token: {device_token})")
             action = await _execute_drawing_with_fusion(
-                subject, device_token, text_response, scroll_meta=scroll_meta
+                subject, device_token, text_response, scroll_meta=scroll_meta, epoch=epoch
             )
             draw_duration = time.time() - draw_start
             if action:
@@ -940,25 +1036,21 @@ async def _execute_drawing_with_fusion(
     device_token: str,
     ai_response: str = "",
     scroll_meta: Optional[Dict[str, Any]] = None,
+    epoch: int = 0,
 ) -> Optional[Dict[str, Any]]:
-    """Same PromptFusion drawing pipeline as SSE text chat."""
+    """One square create-image from the accumulated draft. New draw replaces the previous ready job."""
     context = ConversationManager.get_conversation_context(device_token)
     if context is None:
         context = _default_conversation_context(device_token)
 
-    fusion_inputs = ConversationContextManager.prepare_fusion_inputs(user_text, context)
-    operation = fusion_inputs["operation"]
-    if operation.get("confidence", 0.0) < 0.5:
-        operation["type"] = "create"
-
-    fusion_result = PromptFusionEngine.fuse_drawing_prompt(
-        current_user_text=user_text,
-        operation_type=operation["type"],
-        previous_prompt=fusion_inputs["previous_prompt"],
-        scene_elements=fusion_inputs["scene_elements"],
-    )
-    fused_prompt = fusion_result.get("fused_prompt") or user_text
-    logger.info(f"[DRAWING] Fusion prompt: '{fused_prompt}' (op={operation['type']})")
+    fused_prompt = (user_text or "").strip()
+    fusion_result = {
+        "fused_prompt": fused_prompt,
+        "operation": "create",
+        "target_element": fused_prompt,
+        "all_elements_after": [fused_prompt] if fused_prompt else [],
+    }
+    logger.info(f"[DRAWING] Square create prompt: '{fused_prompt}'")
 
     meta = scroll_meta or _scroll_meta_for_device(device_token)
     action = await async_generate_drawing_with_fusion(
@@ -968,12 +1060,14 @@ async def _execute_drawing_with_fusion(
         seed=meta.get("seed"),
         scroll_id=meta.get("scroll_id"),
         seq=meta.get("seq"),
+        epoch=epoch,
     )
     if not action:
         return None
 
+    latest = ConversationManager.get_conversation_context(device_token) or dict(context)
     updated_ctx = ConversationContextManager.update_context_after_fusion(
-        dict(context),
+        dict(latest),
         fusion_result,
         image_url=action.get("image_url"),
         bitmap_hex=action.get("bitmap_hex"),
@@ -986,7 +1080,8 @@ async def _resolve_doubao_dialog(
     prompt_input: Any, 
     llm_cache: LLMCacheManager,
     history: Optional[List[Dict[str, Any]]] = None,
-    ask_to_draw: bool = False
+    ask_to_draw: bool = False,
+    draft_prompt: str = "",
 ) -> tuple:
     """
     Resolve user dialog via Doubao:
@@ -1010,16 +1105,13 @@ async def _resolve_doubao_dialog(
             llm_start = time.time()
             try:
                 res_data = await asyncio.to_thread(
-                    doubao.unified_text_chat, user_text, history, ask_to_draw
+                    doubao.unified_text_chat, user_text, history, ask_to_draw, draft_prompt
                 )
             except Exception as text_err:
                 logger.warning(f"[DOUBAO] unified_text_chat after STT failed: {text_err}")
             llm_duration = time.time() - llm_start
 
         if not res_data:
-            # An empty transcript is a microphone/STT problem; a non-empty
-            # transcript with no LLM result is a transient network problem.
-            # Do not erase the child's recognized drawing request in the latter.
             res_data = (
                 _dialog_unavailable_response(user_text)
                 if user_text
@@ -1029,7 +1121,7 @@ async def _resolve_doubao_dialog(
         llm_start = time.time()
         try:
             res_data = await asyncio.to_thread(
-                doubao.unified_text_chat, prompt_input, history, ask_to_draw
+                doubao.unified_text_chat, prompt_input, history, ask_to_draw, draft_prompt
             )
         except Exception as text_err:
             logger.warning(f"[DOUBAO] unified_text_chat failed: {text_err}")
@@ -1040,7 +1132,23 @@ async def _resolve_doubao_dialog(
     return res_data, stt_duration, llm_duration
 
 
-async def process_llm_interaction(prompt_input: Any, api_key: str = None, device_token: str = None) -> Dict[str, Any]:
+def _local_followup_payload(draft_prompt: str, history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    follow = _followup_question(draft_prompt, history)
+    return {
+        "user_transcript": "",
+        "assistant_reply": follow,
+        "requires_drawing": False,
+        "drawing_prompt": draft_prompt or "",
+        "psych_metrics": {},
+    }
+
+
+async def process_llm_interaction(
+    prompt_input: Any,
+    api_key: str = None,
+    device_token: str = None,
+    silent: bool = False,
+) -> Dict[str, Any]:
     start_time = time.time()
     stt_duration = 0.0
     llm_duration = 0.0
@@ -1053,28 +1161,76 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
     if not doubao.client:
         raise HTTPException(status_code=500, detail="ARK_API_KEY is not configured")
 
-    # Load context and check turn count
     context = ConversationManager.get_conversation_context(device_token)
     if context is None:
         context = _default_conversation_context(device_token)
 
     message_history = list(context.get("message_history", []))
     turn_count = len(message_history) + 1
-
-    # Check if we should actively guide and ask the child to draw (every 3 conversation turns)
-    ask_to_draw = (turn_count % 3 == 0)
+    draft_prompt = (context.get("draft_prompt") or "").strip()
+    last_ai = ((message_history[-1].get("ai_response") if message_history else "") or "")
+    invited_to_draw = any(k in last_ai for k in ("画出来", "要不要画", "想不想画", "帮你画"))
 
     try:
-        logger.info(f"[CORE] Doubao pipeline for token: {device_token} (Turn: {turn_count}, ask_to_draw: {ask_to_draw})...")
-        dialog_result = await _resolve_doubao_dialog(prompt_input, llm_cache, history=message_history, ask_to_draw=ask_to_draw)
-        res_data, stt_duration, llm_duration = dialog_result
+        logger.info(
+            f"[CORE] Doubao pipeline token={device_token} turn={turn_count} "
+            f"silent={silent} draft='{draft_prompt[:40]}'"
+        )
+
+        res_data = None
+        if silent:
+            if message_history:
+                res_data = _local_followup_payload(draft_prompt, message_history)
+                logger.info("[CORE] Silent turn → context follow-up (no LLM)")
+            else:
+                res_data = _empty_audio_response()
+        else:
+            spoken = prompt_input if isinstance(prompt_input, str) else ""
+            if isinstance(prompt_input, bytes):
+                stt_start = time.time()
+                spoken = await asyncio.to_thread(doubao.transcribe_audio, prompt_input)
+                stt_duration = time.time() - stt_start
+                logger.info(f"[STT] Audio transcribed in {stt_duration:.2f}s. Result: '{spoken}'")
+
+            skip_llm = (
+                bool(message_history)
+                and _is_thinking_utterance(spoken)
+                and not invited_to_draw
+                and not _has_explicit_draw_intent(spoken)
+                and not _is_print_intent(spoken)
+            )
+            if skip_llm:
+                res_data = _local_followup_payload(draft_prompt, message_history)
+                res_data["user_transcript"] = spoken or ""
+                logger.info(f"[CORE] Thinking utterance '{spoken}' → follow-up (no LLM)")
+            elif not spoken and isinstance(prompt_input, bytes):
+                res_data = (
+                    _local_followup_payload(draft_prompt, message_history)
+                    if message_history
+                    else _empty_audio_response()
+                )
+            else:
+                dialog_result = await _resolve_doubao_dialog(
+                    spoken or prompt_input, llm_cache,
+                    history=message_history,
+                    ask_to_draw=bool(draft_prompt) and turn_count >= 4 and turn_count % 4 == 0,
+                    draft_prompt=draft_prompt,
+                )
+                res_data, _stt, llm_duration = dialog_result
+                if not res_data.get("user_transcript"):
+                    res_data["user_transcript"] = spoken
 
         if res_data:
-            user_text = res_data.get("user_transcript", "")
+            user_text = res_data.get("user_transcript", "") or (
+                prompt_input if isinstance(prompt_input, str) else ""
+            )
+            if silent:
+                user_text = ""
+
             text_response = res_data.get("assistant_reply", "")
             requires_drawing = parse_bool(res_data.get("requires_drawing", False)) or parse_bool(res_data.get("requires_painting", False))
             drawing_prompt = res_data.get("drawing_prompt", "") or res_data.get("painting_prompt", "")
-            psych_metrics = res_data.get("psych_metrics", {})
+            psych_metrics = res_data.get("psych_metrics", {}) or {}
 
             requires_drawing, drawing_prompt = _apply_drawing_heuristics(
                 user_text, text_response, requires_drawing, drawing_prompt,
@@ -1084,20 +1240,26 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
             print_action = None
             if _is_print_intent(user_text):
                 requires_drawing = False
-                drawing_prompt = ""
                 print_action = _handle_voice_print(device_token)
                 text_response = print_action.get("message") or text_response
-            elif requires_drawing and text_response and "打印" not in text_response:
-                text_response = text_response.rstrip("。！!? ") + "。画好了告诉我一声，要不要打印呀？"
+            elif requires_drawing:
+                if _is_complete_draw_command(user_text) and draft_prompt:
+                    drawing_prompt = draft_prompt
+                drawing_prompt = _merge_draft_prompt(draft_prompt, drawing_prompt) or drawing_prompt
+                if text_response and "打印" not in text_response:
+                    text_response = text_response.rstrip("。！!? ") + "。画好了看屏幕，点打印就能出纸。"
+            else:
+                drawing_prompt = _merge_draft_prompt(draft_prompt, drawing_prompt)
+
+            draft_prompt = drawing_prompt or draft_prompt
 
             logger.info(
-                f"[DOUBAO] Pipeline OK. Transcript: '{user_text}', "
-                f"Reply: '{text_response}', Drawing: {requires_drawing} ({drawing_prompt})"
+                f"[DOUBAO] Transcript='{user_text}' Reply='{text_response}' "
+                f"Draw={requires_drawing} draft='{draft_prompt}'"
             )
 
             voice_config = get_device_settings(device_token)
 
-            # 1. Start TTS Generation (Fast audio synthesis)
             tts_task = None
             tts_start = time.time()
             if text_response:
@@ -1105,10 +1267,8 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
                     asyncio.to_thread(doubao.generate_speech, text_response, voice_config)
                 )
 
-            # 2. If drawing is requested, launch drawing as an independent background task (DO NOT block the HTTP response!)
             action_preview = print_action
             if requires_drawing and (drawing_prompt or user_text):
-                # Prefer drawing_prompt so Seedream never gets greetings / "好的画出来"
                 fusion_input = drawing_prompt or user_text
                 asyncio.create_task(
                     _enqueue_background_drawing(fusion_input, device_token, text_response, drawing_prompt)
@@ -1123,30 +1283,18 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
                     "seed": seed,
                 }
 
-            # 3. Update and persist message history to conversation context
             new_msg = {
                 "timestamp": time.time(),
                 "user_text": user_text,
                 "ai_response": text_response,
                 "drawing_triggered": requires_drawing,
-                "drawing_prompt": drawing_prompt if requires_drawing else None,
+                "drawing_prompt": drawing_prompt or None,
             }
             message_history.append(new_msg)
-            context["message_history"] = message_history
+            context["message_history"] = message_history[-20:]
+            context["draft_prompt"] = draft_prompt
             ConversationManager.create_or_update_conversation_context(device_token, context)
 
-            # 4. Launch psych vector & embedding save as an independent background task
-            asyncio.create_task(
-                _background_save_psych_vector(
-                    device_token=device_token,
-                    child_text=user_text,
-                    ai_response=text_response,
-                    psych_metrics=psych_metrics,
-                    drawing_prompt=drawing_prompt if requires_drawing else None
-                )
-            )
-
-            # 5. Await only TTS audio for instant response (typically ~0.5s)
             audio_base64 = None
             if tts_task:
                 try:
@@ -1168,17 +1316,45 @@ async def process_llm_interaction(prompt_input: Any, api_key: str = None, device
                 f"====================================================================="
             )
 
-            return_payload = {
+            return {
                 "text_response": text_response,
                 "action": action_preview,
                 "audio_base64": audio_base64,
                 "stt_empty": False if user_text else True,
                 "requires_drawing": requires_drawing,
                 "device_token": device_token,
-                "turn_count": turn_count
+                "turn_count": turn_count,
+                "draft_prompt": draft_prompt,
             }
-            return return_payload
 
     except Exception as pipeline_err:
         logger.error(f"[DOUBAO] Pipeline failed: {pipeline_err}")
         raise HTTPException(status_code=500, detail=f"Voice/chat processing failed: {pipeline_err}")
+
+
+async def archive_after_print(device_token: str, job: Optional[Dict[str, Any]] = None):
+    """Run embedding / psych archive only after the child finished printing."""
+    if not device_token:
+        return
+    context = ConversationManager.get_conversation_context(device_token) or {}
+    history = context.get("message_history") or []
+    parts = []
+    for msg in history[-12:]:
+        u = (msg or {}).get("user_text") or ""
+        a = (msg or {}).get("ai_response") or ""
+        if u:
+            parts.append(f"孩子: {u}")
+        if a:
+            parts.append(f"探奇: {a}")
+    prompt = (job or {}).get("prompt") or context.get("draft_prompt") or ""
+    if prompt:
+        parts.append(f"画作: {prompt}")
+    child_text = "\n".join(parts) or (job or {}).get("prompt") or "一次绘画对话"
+    await _background_save_psych_vector(
+        device_token=device_token,
+        child_text=child_text[:2000],
+        ai_response="打印完成，本轮对话归档",
+        psych_metrics={"archive": "after_print"},
+        drawing_prompt=prompt or None,
+    )
+

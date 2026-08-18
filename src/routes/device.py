@@ -1,7 +1,5 @@
 import asyncio
-import base64
 import json
-import uuid
 import time
 from fastapi import APIRouter, Request, HTTPException, Response, Query, Body
 from fastapi.responses import StreamingResponse
@@ -14,18 +12,16 @@ from src.crud import (
     delete_print_job_from_db,
     get_ready_drawings_from_db,
     queue_print_job,
+    get_print_job_by_id,
     get_jobs_for_scroll,
     queue_scroll_jobs,
 )
 from src.services import VoiceInteractionService, DoubaoAPI
 from src.business_logic import (
-    process_llm_interaction, stream_chat_llm, async_generate_drawing, extract_drawing_subject, async_generate_drawing_with_fusion, is_device_drawing
+    process_llm_interaction, is_device_drawing, archive_after_print
 )
-from src.prompt_refiner import PromptRefinerEngine
 from src.logger import setup_logger
 from src.conversation_crud import ConversationManager
-from src.operation_recognizer import OperationRecognizer
-from src.prompt_fusion import PromptFusionEngine, ConversationContextManager
 from src.utils import is_silent_wav_audio
 
 logger = setup_logger("routes.device")
@@ -54,246 +50,29 @@ async def timeout_generator(gen, limit=20.0):
 
 @router.post("/api/device/v1/chat")
 @router.post("/api/v1/chat")
-async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool] = Query(True)):
+async def handle_chat(req: ChatRequest, request: Request, stream: Optional[bool] = Query(False)):
     token = request.headers.get("x-device-token") or request.headers.get("authorization") or "anonymous_device"
     ua = request.headers.get("user-agent")
     accept_header = request.headers.get("accept", "")
     logger.debug(f"[CONN] Incoming chat request from UA: {ua}, Token: {token[:5] if token else 'None'}***")
 
-    # If stream parameter is explicitly false or Accept header is JSON-only
-    if stream is False or ("application/json" in accept_header and "text/event-stream" not in accept_header):
-        res = await process_llm_interaction(req.text, device_token=token)
-        return res
-
     user_text = req.text.strip() if req.text else ""
     if not user_text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
+    res = await process_llm_interaction(user_text, device_token=token)
+
+    want_sse = stream is True or ("text/event-stream" in accept_header and stream is not False)
+    if not want_sse:
+        return res
+
     async def event_generator():
-        # Load or create conversation context
-        logger.debug(f"[INTEGRATION] Loading context for token: {token}")
-        context = ConversationManager.get_conversation_context(token)
-        if context is None:
-            context = {
-                "device_token": token,
-                "message_history": [],
-                "current_image_url": None,
-                "current_image_bitmap_hex": None,
-                "scene_elements": [],
-                "last_generated_prompt": None,
-                "last_operation_type": None,
-                "last_operation_detail": {},
-                "created_at": None,
-                "updated_at": None
-            }
-            logger.debug(f"[INTEGRATION] Created new context for token: {token}")
-        else:
-            logger.debug(f"[INTEGRATION] Loaded existing context for token: {token}")
-            logger.debug(f"[INTEGRATION] Current scene elements: {context.get('scene_elements', [])}")
-            logger.debug(f"[INTEGRATION] Message history count: {len(context.get('message_history', []))}")
-
-        drawing_keywords = [
-            "画", "画画", "画一个", "画一只", "画一架", "画辆", "画朵", "画条", "画一条", "画张", "画一幅", 
-            "画个", "画出", "画一画", "想要画", "帮我画", "可以画", "画出来",
-            "画小猫", "画小狗", "画小鱼", "画小兔",
-            "增加", "加一个", "加个", "添一个", "多一个", "再画", "旁边加", "添加", "加上", 
-            "去掉", "擦掉", "删除", "不要", "变成", "改色",
-            "爱", "爱一下", "爱一个", "我爱", "喜欢", "喜欢画"
-        ]
-        user_text_lower = user_text.lower()
-        should_draw = any(kw in user_text_lower for kw in drawing_keywords)
-
-        # ✅ 检测"画出来"等模糊命令 - 用户之前已描述内容,现在只是下达绘画指令
-        explicit_draw_commands = ["画出来", "开始画", "给我画", "帮我画", "执行绘画"]
-        is_explicit_draw_command = user_text.strip() in explicit_draw_commands
-
-        drawing_task = None
-        action_result = None
-        fusion_result = {}
-        operation = {"type": "create", "confidence": 1.0}
-
-        if should_draw:
-            if is_explicit_draw_command:
-                # ✅ 显式绘画命令: 从对话历史中查找用户之前描述的完整内容
-                logger.info(f"[DRAWING] Explicit draw command detected: {user_text}")
-
-                drawing_prompt = None
-                message_history = context.get("message_history", []) or []
-
-                # 从最近往回查,找第一条不包含"画"的用户消息(那是描述内容)
-                for msg in reversed(message_history[-10:]):  # 查最近10条
-                    msg_user_text = (msg or {}).get("user_text", "").strip()
-                    if msg_user_text and "画" not in msg_user_text:
-                        drawing_prompt = msg_user_text
-                        logger.info(f"[DRAWING] Found description in history: {drawing_prompt}")
-                        break
-                if not drawing_prompt:
-                    # 尝试用 LLM Refiner 从整个对话历史提炼
-                    logger.info(f"[DRAWING] Attempting LLM Refiner to extract prompt from conversation...")
-                    refined = PromptRefinerEngine.refine_from_conversation_history(token, last_n=10)
-                    if refined:
-                        drawing_prompt = refined
-                        logger.info(f"[DRAWING] LLM Refiner result: {drawing_prompt}")
-                    else:
-                        drawing_prompt = "可爱的小动物"
-                        logger.warning(f"[DRAWING] LLM Refiner failed, using default: {drawing_prompt}")
-
-                fusion_result = {
-                    "fused_prompt": drawing_prompt,
-                    "operation": "create",
-                    "target_element": drawing_prompt,
-                    "all_elements_after": [drawing_prompt]
-                }
-                operation["type"] = "create"
-
-            else:
-                # 正常流程: 用户描述了想要的东西,同时说了"画"
-                logger.debug(f"[INTEGRATION] Preparing fusion for prompt: {user_text}")
-                fusion_inputs = ConversationContextManager.prepare_fusion_inputs(user_text, context)
-                operation = fusion_inputs["operation"]
-                logger.debug(f"[INTEGRATION] Recognized operation: {operation['type']} (confidence: {operation['confidence']})")
-
-                # If confidence is low (< 0.5), we downgrade to create or fallback to simple subject extraction
-                if operation.get("confidence", 0.0) < 0.5:
-                    operation["type"] = "create"
-
-                fusion_result = PromptFusionEngine.fuse_drawing_prompt(
-                    current_user_text=user_text,
-                    operation_type=operation["type"],
-                    previous_prompt=fusion_inputs["previous_prompt"],
-                    scene_elements=fusion_inputs["scene_elements"]
-                )
-
-                # Sync the final operation type (in case it was downgraded/adjusted by the fusion engine)
-                operation["type"] = fusion_result.get("operation", operation["type"])
-
-                logger.debug(f"[INTEGRATION] Fusion complete:")
-                logger.debug(f"  - Fused Prompt: {fusion_result.get('fused_prompt', '')[:100]}...")
-                logger.debug(f"  - Target Element: {fusion_result.get('target_element')}")
-                logger.debug(f"  - All Elements After: {fusion_result.get('all_elements_after', [])}")
-
-            drawing_prompt = fusion_result.get("fused_prompt", user_text)
-            subject = fusion_result.get("target_element") or extract_drawing_subject(user_text, context) or "可爱"
-
-            # ✅ 关键日志:打印完整的绘画提示词
-            logger.info(f"[DRAWING] ========== FINAL DRAWING PROMPT ==========")
-            logger.info(f"[DRAWING] User said: {user_text}")
-            logger.info(f"[DRAWING] Will draw: {drawing_prompt}")
-            logger.info(f"[DRAWING] ==========================================")
-            print(f"[DRAWING] Final prompt: {drawing_prompt}")
-
-            logger.debug(f"[INTEGRATION] Launching async draw task")
-            drawing_task = asyncio.create_task(
-                async_generate_drawing_with_fusion(drawing_prompt, token, fusion_result)
-            )
-
-        # Stream LLM text output token-by-token
-        ai_response_text = ""
-        try:
-            async for chunk in stream_chat_llm(user_text):
-                safe_chunk = chunk.replace("\n", " ")
-                ai_response_text += chunk
-                yield f"data: {safe_chunk}\n\n"
-        except Exception as stream_err:
-            logger.error(f"[CHAT_SSE] Text streaming error: {stream_err}")
-
-        # Convert AI response text to speech via TTS and send it as an SSE event so
-        # the client can play it back immediately.
-        if ai_response_text.strip():
-            try:
-                doubao = DoubaoAPI.get_instance()
-                voice_config = "一个极其温柔、友好、可爱的5岁小朋友，用稚嫩温和的语气说话"
-                audio_bytes = await asyncio.to_thread(
-                    doubao.generate_speech_bytes, ai_response_text, voice_config
-                )
-
-                if audio_bytes:
-                    audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
-                    audio_event = {
-                        "type": "ai_response_audio",
-                        "audio": audio_base64,
-                        "text": ai_response_text
-                    }
-                    yield f"data: {json.dumps(audio_event, ensure_ascii=False)}\n\n"
-                    logger.info(f"[CHAT_SSE] AI audio sent ({len(audio_bytes)} bytes)")
-                else:
-                    logger.warning("[CHAT_SSE] TTS returned empty audio, skipping ai_response_audio event")
-            except Exception as tts_err:
-                logger.error(f"[CHAT_SSE] TTS error: {tts_err}")
-
-        # Wait for parallel drawing generation if triggered
-        if drawing_task:
-            try:
-                wait_seconds = 0
-                max_wait_seconds = 60
-                while not drawing_task.done() and wait_seconds < max_wait_seconds:
-                    try:
-                        action_result = await asyncio.wait_for(asyncio.shield(drawing_task), timeout=1.0)
-                        break
-                    except asyncio.TimeoutError:
-                        wait_seconds += 1
-                        # Yield an SSE comment heartbeat to keep connection alive and reset idle proxies
-                        yield ": heartbeat\n\n"
-                if not drawing_task.done():
-                    logger.warning("[CHAT_SSE] Drawing task exceeded max wait time, cancelling...")
-                    drawing_task.cancel()
-                    action_result = None
-                else:
-                    action_result = drawing_task.result()
-            except Exception as task_err:
-                logger.error(f"[CHAT_SSE] Async drawing task error: {task_err}")
-                action_result = None
-
-        # Update and save context
-        img_url = action_result.get("image_url") if action_result else None
-        bmp_hex = action_result.get("bitmap_hex") if action_result else None
-
-        # Deepcopy or update context local var
-        updated_ctx = dict(context)
-        if should_draw and fusion_result:
-            updated_ctx = ConversationContextManager.update_context_after_fusion(
-                updated_ctx,
-                fusion_result,
-                image_url=img_url,
-                bitmap_hex=bmp_hex
-            )
-
-        # Append to message history list
-        message = {
-            "timestamp": time.time(),
-            "user_text": user_text,
-            "ai_response": ai_response_text,
-            "drawing_triggered": should_draw,
-            "drawing_config": fusion_result if should_draw else None,
-            "operation_type": operation["type"] if should_draw else None,
-            "metadata": {
-                "recognition_confidence": operation.get("confidence", 0),
-                "scene_elements_after": updated_ctx.get("scene_elements", [])
-            }
-        }
-        
-        # Ensure we don't modify a shared default list
-        history_list = list(updated_ctx.get("message_history", []))
-        history_list.append(message)
-        updated_ctx["message_history"] = history_list
-
-        # Save context to DB
-        success = ConversationManager.create_or_update_conversation_context(token, updated_ctx)
-        if success:
-            logger.info(f"[INTEGRATION] ✅ Saved updated context in database")
-        else:
-            logger.error(f"[INTEGRATION] ❌ Failed to save context in database")
-
-        # Yield final action payload in the last SSE data frame
-        final_payload = {
-            "action": action_result,
-            "refined_prompt": action_result.get("fused_prompt") if action_result else None,
-            "context": {
-                "scene_elements": updated_ctx.get("scene_elements", []),
-                "message_count": len(updated_ctx.get("message_history", []))
-            }
-        }
-        yield f"data: {json.dumps(final_payload, ensure_ascii=False)}\n\n"
+        text = (res.get("text_response") or "").replace("\n", " ")
+        step = 12
+        for i in range(0, max(len(text), 1), step):
+            chunk = text[i:i + step] if text else " "
+            yield f"data: {chunk}\n\n"
+        yield f"data: {json.dumps({'action': res.get('action'), 'draft_prompt': res.get('draft_prompt'), 'requires_drawing': res.get('requires_drawing')}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         timeout_generator(event_generator(), limit=60.0),
@@ -336,15 +115,23 @@ async def handle_voice(request: Request):
             raise HTTPException(status_code=400, detail="Empty audio body received")
 
         if is_silent_wav_audio(audio_bytes):
-            logger.info("[VOICE] Rejected silent WAV from token=%s", token[:5] + "***")
-            raise HTTPException(
-                status_code=422,
-                detail="No audible speech detected. Please record again closer to the microphone.",
-            )
+            context = ConversationManager.get_conversation_context(token)
+            has_history = bool((context or {}).get("message_history"))
+            if not has_history:
+                logger.info("[VOICE] Silent WAV with no chat yet token=%s", token[:5] + "***")
+                raise HTTPException(
+                    status_code=422,
+                    detail="No audible speech detected. Please record again closer to the microphone.",
+                )
+            logger.info("[VOICE] Silent WAV → context follow-up token=%s", token[:5] + "***")
+            res = await process_llm_interaction(audio_bytes, device_token=token, silent=True)
+            return res
 
         res = await process_llm_interaction(audio_bytes, device_token=token)
         logger.debug(f"[VOICE] Response generated: {res.get('text_response')[:50]}...")
         return res
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[VOICE] Server Error during processing: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -426,8 +213,10 @@ async def complete_print_job(job_id: str, request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
         
     try:
+        job = get_print_job_by_id(job_id)
         delete_print_job_from_db(job_id)
         print(f"[DEBUG] [PRINT] Job {job_id} marked as complete and deleted.")
+        asyncio.create_task(archive_after_print(token, job))
         return {
             "success": True,
             "message": "Print job completed successfully",

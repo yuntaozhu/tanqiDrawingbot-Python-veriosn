@@ -41,6 +41,7 @@ class ConversationManager:
                 "last_operation_detail": {},
                 "current_scroll_id": getattr(record, "current_scroll_id", None),
                 "current_seed": getattr(record, "current_seed", None),
+                "draft_prompt": getattr(record, "draft_prompt", None) or "",
                 "created_at": record.created_at,
                 "updated_at": record.updated_at
             }
@@ -60,12 +61,15 @@ class ConversationManager:
             scene_elements = context_data.get("scene_elements", [])
             last_generated_prompt = context_data.get("last_generated_prompt")
             last_operation_type = context_data.get("last_operation_type")
+            draft_prompt = context_data.get("draft_prompt")
             
             if record:
                 record.message_history = message_history
                 record.scene_elements = scene_elements
                 record.last_generated_prompt = last_generated_prompt
                 record.last_operation_type = last_operation_type
+                if "draft_prompt" in context_data:
+                    record.draft_prompt = draft_prompt
                 record.updated_at = datetime.datetime.utcnow()
             else:
                 record = ConversationContext(
@@ -74,6 +78,7 @@ class ConversationManager:
                     scene_elements=scene_elements,
                     last_generated_prompt=last_generated_prompt,
                     last_operation_type=last_operation_type,
+                    draft_prompt=draft_prompt,
                     created_at=datetime.datetime.utcnow(),
                     updated_at=datetime.datetime.utcnow()
                 )
@@ -144,6 +149,8 @@ class ConversationManager:
                 record.scene_elements = []
                 record.last_generated_prompt = None
                 record.last_operation_type = None
+                record.draft_prompt = None
+                record.message_history = []
                 record.updated_at = now
             else:
                 record = ConversationContext(
@@ -154,6 +161,7 @@ class ConversationManager:
                     last_operation_type=None,
                     current_scroll_id=scroll_id,
                     current_seed=seed,
+                    draft_prompt=None,
                     created_at=now,
                     updated_at=now,
                 )
@@ -208,6 +216,7 @@ class ConversationManager:
                     record.scene_elements = []
                     record.last_generated_prompt = None
                     record.last_operation_type = None
+                    record.draft_prompt = None
                     record.updated_at = datetime.datetime.utcnow()
                     db.commit()
                 else:

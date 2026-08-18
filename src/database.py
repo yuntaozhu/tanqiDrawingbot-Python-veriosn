@@ -65,6 +65,7 @@ def _migrate_print_jobs_columns():
     _add_columns("conversation_contexts", [
         ("current_scroll_id", "ALTER TABLE conversation_contexts ADD COLUMN current_scroll_id VARCHAR(255)"),
         ("current_seed", "ALTER TABLE conversation_contexts ADD COLUMN current_seed INTEGER"),
+        ("draft_prompt", "ALTER TABLE conversation_contexts ADD COLUMN draft_prompt TEXT"),
     ])
 
     if _has_column("print_jobs", "status"):
